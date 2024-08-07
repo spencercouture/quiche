@@ -49,11 +49,16 @@ use quiche_apps::common::*;
 
 use quiche_apps::sendto::*;
 
+use quiche_apps::custom_cache;
+
 const MAX_BUF_SIZE: usize = 65507;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
+    // get protobuf-populated cache
+    let mut cache: HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>> = custom_cache::get_cache();
+
     let mut buf = [0; MAX_BUF_SIZE];
     let mut out = [0; MAX_BUF_SIZE];
     let mut pacing = false;
@@ -507,7 +512,7 @@ fn main() {
                         partial_responses,
                         &args.root,
                         &args.index,
-                        &mut buf,
+                        &mut buf, &mut cache
                     )
                     .is_err()
                 {

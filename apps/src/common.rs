@@ -28,6 +28,7 @@
 //!
 //! This module provides some utility functions that are common to quiche
 //! applications.
+use crate::custom_cache;
 
 use std::io::prelude::*;
 
@@ -349,7 +350,7 @@ pub trait HttpConn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
+        index: &str, buf: &mut [u8], protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
     ) -> quiche::h3::Result<()>;
 
     fn handle_writable(
@@ -566,7 +567,7 @@ impl HttpConn for Http09Conn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
+        index: &str, buf: &mut [u8], _protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
     ) -> quiche::h3::Result<()> {
         // Process all readable streams.
         for s in conn.readable() {
@@ -889,16 +890,17 @@ impl Http3Conn {
 
     /// Builds an HTTP/3 response given a request.
     fn build_h3_response(
-        root: &str, index: &str, request: &[quiche::h3::Header],
+        _root: &str, _index: &str, request: &[quiche::h3::Header],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
     ) -> Http3ResponseBuilderResult {
-        let mut file_path = path::PathBuf::from(root);
         let mut scheme = None;
-        let mut authority = None;
         let mut host = None;
+        let mut authority = None;
         let mut path = None;
         let mut method = None;
+        let mut ifnonematch = None;
         let mut priority = vec![];
 
+        
         // Parse some of the request headers.
         for hdr in request {
             match hdr.name() {
@@ -911,17 +913,6 @@ impl Http3Conn {
                     }
 
                     scheme = Some(std::str::from_utf8(hdr.value()).unwrap());
-                },
-
-                b":authority" => {
-                    if authority.is_some() {
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":authority cannot be duplicated".to_string(),
-                        ));
-                    }
-
-                    authority = Some(std::str::from_utf8(hdr.value()).unwrap());
                 },
 
                 b":path" => {
@@ -946,14 +937,26 @@ impl Http3Conn {
                     method = Some(std::str::from_utf8(hdr.value()).unwrap())
                 },
 
-                b":protocol" => {
-                    return Err((
-                        H3_MESSAGE_ERROR,
-                        ":protocol not supported".to_string(),
-                    ));
+
+                b":authority" => {
+                    if authority.is_some() {
+                        return Err((
+                            H3_MESSAGE_ERROR,
+                            ":authority cannot be duplicated".to_string(),
+                        ));
+                    }
+
+                    authority = Some(std::str::from_utf8(hdr.value()).unwrap());
                 },
 
-                b"priority" => priority = hdr.value().to_vec(),
+                b":if-none-match" => {
+                    ifnonematch = Some(std::str::from_utf8(hdr.value()).unwrap());
+                },
+
+                b"priority" => {
+                    priority = hdr.value().to_vec();
+                    println!("priority_log_message: initial priority (found in header) of {:?}", priority);
+                },
 
                 b"host" => host = Some(std::str::from_utf8(hdr.value()).unwrap()),
 
@@ -961,66 +964,6 @@ impl Http3Conn {
             }
         }
 
-        let decided_method = match method {
-            Some(method) => {
-                match method {
-                    "" =>
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":method value cannot be empty".to_string(),
-                        )),
-
-                    "CONNECT" => {
-                        // not allowed
-                        let headers = vec![
-                            quiche::h3::Header::new(
-                                b":status",
-                                "405".to_string().as_bytes(),
-                            ),
-                            quiche::h3::Header::new(b"server", b"quiche"),
-                        ];
-
-                        return Ok((headers, b"".to_vec(), Default::default()));
-                    },
-
-                    _ => method,
-                }
-            },
-
-            None =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":method cannot be missing".to_string(),
-                )),
-        };
-
-        let decided_scheme = match scheme {
-            Some(scheme) => {
-                if scheme != "http" && scheme != "https" {
-                    let headers = vec![
-                        quiche::h3::Header::new(
-                            b":status",
-                            "400".to_string().as_bytes(),
-                        ),
-                        quiche::h3::Header::new(b"server", b"quiche"),
-                    ];
-
-                    return Ok((
-                        headers,
-                        b"Invalid scheme".to_vec(),
-                        Default::default(),
-                    ));
-                }
-
-                scheme
-            },
-
-            None =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":scheme cannot be missing".to_string(),
-                )),
-        };
 
         let decided_host = match (authority, host) {
             (None, Some("")) =>
@@ -1051,64 +994,128 @@ impl Http3Conn {
             (..) => authority.unwrap(),
         };
 
-        let decided_path = match path {
-            Some("") =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":path value cannot be empty".to_string(),
-                )),
+        // // // test cache access
+        // let cache_key = CacheKey{
+        //     method: "GET".to_string(),
+        //     keyuri: "/".to_string(),
+        //     host: "www.unh.edu".to_string(),
+        //     https: false
+        // };
+
+        // setup fields for cache key  
+        let is_https = match scheme {
+            Some(scheme) => {
+                if scheme != "http" && scheme != "https" {
+                    return Err((
+                        H3_MESSAGE_ERROR,
+                        ":scheme is not http or https".to_string(),
+                    ))
+                }
+                if scheme == "https" { true } else { false }
+            },
 
             None =>
                 return Err((
                     H3_MESSAGE_ERROR,
-                    ":path cannot be missing".to_string(),
+                    ":scheme cannot be missing".to_string(),
                 )),
-
-            Some(path) => path,
         };
 
-        let url = format!("{decided_scheme}://{decided_host}{decided_path}");
-        let url = url::Url::parse(&url).unwrap();
+        // build our cache_key
+        let og_path = path.expect("error with path").to_string();
+        let keyuri = og_path.split("?").collect::<Vec<_>>()[0];
 
-        let pathbuf = path::PathBuf::from(url.path());
-        let pathbuf = autoindex(pathbuf, index);
+        let cache_key = custom_cache::CacheKey{
+            method: method.expect("error with method").to_string(),
+            keyuri: keyuri.to_string(),
+            host: decided_host.to_string(),
+            https: is_https
+        };
 
-        // Priority query string takes precedence over the header.
-        // So replace the header with one built here.
-        let query_priority = priority_field_value_from_query_string(&url);
+        println!("CACHE_KEY: {:?}", cache_key);
+        
+        let entries = match protobuf_cache.get(&cache_key) {
+            Some(ent) => ent,
+            None => {
+                println!("ERROR, no entries found for key: {:?}", cache_key);
+                // if we found no entries, throw error?
+                let headers = vec![
+                    quiche::h3::Header::new(b":status", "404".to_string().as_bytes()),
+                    quiche::h3::Header::new(b"server", b"quiche"),
+                    quiche::h3::Header::new(
+                        b"content-length",
+                        "Not Found!".to_string().as_bytes(),
+                    ),
+                ];
+                return Ok((headers, "Not Found!".to_string().as_bytes().to_vec(), Vec::new()));
+            }
+        };
 
-        if let Some(p) = query_priority {
-            priority = p.as_bytes().to_vec();
-        }
+        println!("{} entries found.", entries.len());
 
-        let (status, body) = match decided_method {
-            "GET" => {
-                for c in pathbuf.components() {
-                    if let path::Component::Normal(v) = c {
-                        file_path.push(v)
+        // now we find the best fit
+        let mut best_fit = -1;
+        let mut chosen_entry = None;
+        println!("starting best fit algorithm...");
+        for (idx,entry) in entries.iter().enumerate() {
+            let i_start = keyuri.len();
+            let mut i_end = og_path.len();
+            if i_end > entry.request_uri.len() {
+                i_end = entry.request_uri.len();
+            }
+            let og_path_bytes = og_path.as_bytes();
+            let entry_req_uri_bytes = entry.request_uri.as_bytes();
+            let mut fit = 0;
+            for i in i_start..i_end {
+                if og_path_bytes[i] != entry_req_uri_bytes[i] {
+                    break;
+                }
+                fit += 1;
+            }
+
+            println!("\tgot fit of {} while comparing og_path with entry.request_uri:", fit);
+            println!("\t\t{}  w/   {}", og_path, entry.request_uri);
+
+            if fit >= best_fit {
+                // if we have a ifnonematch value in the request header, and one in the entry, make sure they match
+                if let (Some((_,ifnonematch_val)), Some(ifnonematch_hash)) = (entry.request_headers.get("if-none-match"), ifnonematch) {
+                    if ifnonematch_val == ifnonematch_hash && entry.response_status == 304 {
+                        println!("\tfound a matching ifnonematch hash! {}", ifnonematch_hash);
+                        chosen_entry = Some(entry);
+                        break;
                     }
                 }
-
-                match std::fs::read(file_path.as_path()) {
-                    Ok(data) => (200, data),
-
-                    Err(_) => (404, b"Not Found!".to_vec()),
+                else if entry.response_status == 200 {
+                    println!("\tentry's is 200");
+                    println!("\t\tupdating best_fit to entry index {}", idx);
+                    best_fit = fit;
+                    chosen_entry = Some(entry);
                 }
-            },
+                else if fit > best_fit {
+                    println!("\tfit({}) is better than best_fit({})", fit, best_fit);
+                    println!("\t\tupdating best_fit to entry index {}", idx);
+                    best_fit = fit;
+                    chosen_entry = Some(entry);
+                }
+            }
+        }
+        println!("ending best fit algorithm.");
 
-            _ => (405, Vec::new()),
-        };
 
-        let headers = vec![
-            quiche::h3::Header::new(b":status", status.to_string().as_bytes()),
-            quiche::h3::Header::new(b"server", b"quiche"),
-            quiche::h3::Header::new(
-                b"content-length",
-                body.len().to_string().as_bytes(),
-            ),
-        ];
+        // always return the first entry?
+        let res = chosen_entry.unwrap();
+        // build headers
+        let mut headers = Vec::new();
 
-        Ok((headers, body, priority))
+        println!("sending back headers:");
+        headers.push(quiche::h3::Header::new(b":status", res.response_status.to_string().as_bytes()));
+        for (rheader1, rheader2) in res.response_headers.iter() {
+            headers.push(quiche::h3::Header::new(rheader1.as_bytes(), rheader2.as_bytes()));
+            println!("\t{}\n\t\t{}", rheader1, rheader2);
+        }
+        println!("");
+
+        Ok((headers, res.response_body.clone(), priority))
     }
 }
 
@@ -1390,7 +1397,7 @@ impl HttpConn for Http3Conn {
         &mut self, conn: &mut quiche::Connection,
         _partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
+        index: &str, buf: &mut [u8],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
     ) -> quiche::h3::Result<()> {
         // Process HTTP stream-related events.
         loop {
@@ -1414,7 +1421,7 @@ impl HttpConn for Http3Conn {
                         .unwrap();
 
                     let (mut headers, body, mut priority) =
-                        match Http3Conn::build_h3_response(root, index, &list) {
+                        match Http3Conn::build_h3_response(root, index, &list, protobuf_cache) {
                             Ok(v) => v,
 
                             Err((error_code, _)) => {
@@ -1430,6 +1437,7 @@ impl HttpConn for Http3Conn {
 
                     match self.h3_conn.take_last_priority_update(stream_id) {
                         Ok(v) => {
+                            print!("priority_log_message: tuke_last_priority_update - streamid={}, priority={:?}", stream_id, v);
                             priority = v;
                         },
 
@@ -1460,11 +1468,33 @@ impl HttpConn for Http3Conn {
                     #[cfg(not(feature = "sfv"))]
                     let priority = quiche::h3::Priority::default();
 
+                    // this looks like it pulls the priority update for the stream, if it was
+                    // received before the request. if so, it pushes the "priority" header?
+                    // ... if this is true, im not sure why we didnt see the "priority" header
+                    // being parsed in our build_h3_response function...
                     info!(
                         "{} prioritizing response on stream {} as {:?}",
                         conn.trace_id(),
                         stream_id,
                         priority
+                    );
+
+                    let mut content_type = String::from("unknown");
+                    // find the content-type header for logging
+                    for i in headers.iter_mut() {
+                        // let quiche::h3::Header(headk, headv) = i;
+                        let headn = String::from_utf8(i.name().to_vec()).unwrap();
+                        let headv = String::from_utf8(i.value().to_vec()).unwrap();
+                        if headn == "content-type" {
+                            content_type = headv;
+                        }
+                    }
+
+                    info!("resource_priority ### {} ### {:?} ### {:?} ### {}",
+                        stream_id,
+                        priority,
+                        hdrs_to_strings(&list),
+                        content_type
                     );
 
                     match self.h3_conn.send_response_with_priority(

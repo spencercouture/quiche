@@ -26,8 +26,11 @@
 
 #[macro_use]
 extern crate log;
+extern crate protobuf;
 
 pub mod args;
 pub mod client;
 pub mod common;
 pub mod sendto;
+pub mod http_record;
+pub mod custom_cache;

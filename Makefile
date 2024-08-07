@@ -11,6 +11,9 @@ FUZZ_TAG  = latest
 
 docker-build: docker-base docker-qns
 
+docker-protobuf-build: Dockerfile
+	$(DOCKER) build --target quiche-base -t scouture/protobuf-quiche:latest .
+
 # build quiche-apps only
 .PHONY: build-apps
 build-apps:
