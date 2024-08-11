@@ -118,6 +118,11 @@ pub fn get_cache() -> HashMap<CacheKey, Vec<CacheEntry>> {
     let pb_files = fs::read_dir("/protobuf_files").unwrap();
     'foreach_file: for pb_file in pb_files {
         let path = pb_file.unwrap().path();
+
+        if path.extension() != Some(std::ffi::OsStr::new("save")) {
+            continue;
+        }
+
         let mut f = File::open(path.to_owned()).unwrap();
         let mut buffer = Vec::new();
         // read the whole file

@@ -3,6 +3,7 @@ cert_file=$1
 key_file=$2
 addr=$3
 idx=$4
+directory=$5
 
 # move cert and key files over
 docker exec quiche-server mkdir -p /server-data/$idx
@@ -10,7 +11,7 @@ docker cp $cert_file quiche-server:/server-data/$idx
 docker cp $key_file quiche-server:/server-data/$idx
 
 # move protobuf files over
-docker cp ../../protobuf_files/. quiche-server:/protobuf_files/
+docker cp $directory/. quiche-server:/protobuf_files
 
 cert_basename=$(basename $cert_file)
 key_basename=$(basename $key_file)
