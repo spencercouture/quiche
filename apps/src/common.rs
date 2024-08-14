@@ -29,6 +29,7 @@
 //! This module provides some utility functions that are common to quiche
 //! applications.
 use crate::custom_cache;
+use crate::priority_logger;
 
 use std::io::prelude::*;
 
@@ -350,7 +351,12 @@ pub trait HttpConn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8], protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8],
+        protobuf_cache: &mut HashMap<
+            custom_cache::CacheKey,
+            Vec<custom_cache::CacheEntry>,
+        >,
+        priority_logger: &mut priority_logger::PriorityLogger,
     ) -> quiche::h3::Result<()>;
 
     fn handle_writable(
@@ -567,7 +573,12 @@ impl HttpConn for Http09Conn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8], _protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8],
+        _protobuf_cache: &mut HashMap<
+            custom_cache::CacheKey,
+            Vec<custom_cache::CacheEntry>,
+        >,
+        _priority_logger: &mut priority_logger::PriorityLogger,
     ) -> quiche::h3::Result<()> {
         // Process all readable streams.
         for s in conn.readable() {
@@ -890,7 +901,11 @@ impl Http3Conn {
 
     /// Builds an HTTP/3 response given a request.
     fn build_h3_response(
-        _root: &str, _index: &str, request: &[quiche::h3::Header],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        _root: &str, _index: &str, request: &[quiche::h3::Header],
+        protobuf_cache: &mut HashMap<
+            custom_cache::CacheKey,
+            Vec<custom_cache::CacheEntry>,
+        >,
     ) -> Http3ResponseBuilderResult {
         let mut scheme = None;
         let mut host = None;
@@ -1397,7 +1412,12 @@ impl HttpConn for Http3Conn {
         &mut self, conn: &mut quiche::Connection,
         _partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8],
+        protobuf_cache: &mut HashMap<
+            custom_cache::CacheKey,
+            Vec<custom_cache::CacheEntry>,
+        >,
+        priority_logger: &mut priority_logger::PriorityLogger,
     ) -> quiche::h3::Result<()> {
         // Process HTTP stream-related events.
         loop {
@@ -1421,7 +1441,12 @@ impl HttpConn for Http3Conn {
                         .unwrap();
 
                     let (mut headers, body, mut priority) =
-                        match Http3Conn::build_h3_response(root, index, &list, protobuf_cache) {
+                        match Http3Conn::build_h3_response(
+                            root,
+                            index,
+                            &list,
+                            protobuf_cache,
+                        ) {
                             Ok(v) => v,
 
                             Err((error_code, _)) => {
@@ -1437,7 +1462,7 @@ impl HttpConn for Http3Conn {
 
                     match self.h3_conn.take_last_priority_update(stream_id) {
                         Ok(v) => {
-                            print!("priority_log_message: tuke_last_priority_update - streamid={}, priority={:?}", stream_id, v);
+                            print!("priority_log_message: take_last_priority_update - streamid={}, priority={:?}", stream_id, v);
                             priority = v;
                         },
 
@@ -1490,12 +1515,19 @@ impl HttpConn for Http3Conn {
                         }
                     }
 
-                    info!("resource_priority ### {} ### {:?} ### {:?} ### {}",
+                    priority_logger.add_msg(
                         stream_id,
-                        priority,
+                        &priority,
                         hdrs_to_strings(&list),
-                        content_type
+                        content_type,
                     );
+
+                    // info!("resource_priority ### {} ### {:?} ### {:?} ### {}",
+                    //     stream_id,
+                    //     priority,
+                    //     hdrs_to_strings(&list),
+                    //     content_type
+                    // );
 
                     match self.h3_conn.send_response_with_priority(
                         conn, stream_id, &headers, &priority, false,

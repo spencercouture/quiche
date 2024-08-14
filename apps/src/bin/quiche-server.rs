@@ -51,13 +51,18 @@ use quiche_apps::sendto::*;
 
 use quiche_apps::custom_cache;
 
+use quiche_apps::priority_logger;
+
 const MAX_BUF_SIZE: usize = 65507;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
     // get protobuf-populated cache
-    let mut cache: HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>> = custom_cache::get_cache();
+    let mut cache: HashMap<
+        custom_cache::CacheKey,
+        Vec<custom_cache::CacheEntry>,
+    > = custom_cache::get_cache();
 
     let mut buf = [0; MAX_BUF_SIZE];
     let mut out = [0; MAX_BUF_SIZE];
@@ -69,6 +74,14 @@ fn main() {
     let docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
     let conn_args = CommonArgs::with_docopt(&docopt);
     let args = ServerArgs::with_docopt(&docopt);
+
+    let mut priorities_json = args.priorities_json;
+    if priorities_json.is_empty() {
+        priorities_json.push_str("/priorities.json");
+    }
+    // setup our priority logger
+    let mut priority_logger =
+        priority_logger::PriorityLogger::new(priorities_json);
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
@@ -512,11 +525,18 @@ fn main() {
                         partial_responses,
                         &args.root,
                         &args.index,
-                        &mut buf, &mut cache
+                        &mut buf,
+                        &mut cache,
+                        &mut priority_logger,
                     )
                     .is_err()
                 {
                     continue 'read;
+                }
+                // write our JSON file
+                match priority_logger.write_to_json() {
+                    Ok(_) => info!("updated priorities JSON file"),
+                    Err(_) => info!("error writing to priorities JSON file"),
                 }
             }
 

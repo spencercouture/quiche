@@ -436,6 +436,7 @@ Options:
   --listen <addr>             Listen on the given IP:port [default: 127.0.0.1:4433]
   --cert <file>               TLS certificate path [default: src/bin/cert.crt]
   --key <file>                TLS certificate key path [default: src/bin/cert.key]
+  --priorities-json <file>    Where to write PriorityLogMsg JSON output to
   --root <dir>                Root directory [default: src/bin/root/]
   --index <name>              The file that will be used as index [default: index.html].
   --name <str>                Name of the server [default: quic.tech]
@@ -474,6 +475,7 @@ pub struct ServerArgs {
     pub root: String,
     pub index: String,
     pub cert: String,
+    pub priorities_json: String,
     pub key: String,
     pub disable_gso: bool,
     pub disable_pacing: bool,
@@ -489,6 +491,7 @@ impl Args for ServerArgs {
         let root = args.get_str("--root").to_string();
         let index = args.get_str("--index").to_string();
         let cert = args.get_str("--cert").to_string();
+        let priorities_json = args.get_str("--priorities-json").to_string();
         let key = args.get_str("--key").to_string();
         let disable_gso = args.get_bool("--disable-gso");
         let disable_pacing = args.get_bool("--disable-pacing");
@@ -500,6 +503,7 @@ impl Args for ServerArgs {
             root,
             index,
             cert,
+            priorities_json,
             key,
             disable_gso,
             disable_pacing,

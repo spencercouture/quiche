@@ -832,6 +832,12 @@ impl Priority {
             incremental,
         }
     }
+
+    /// Public access for struct fields
+    #[allow(missing_docs)]
+    pub fn get_fields(&self) -> (u8, bool) {
+        (self.urgency, self.incremental)
+    }
 }
 
 #[cfg(feature = "sfv")]

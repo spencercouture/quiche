@@ -16,7 +16,7 @@ docker cp $directory/. quiche-server:/protobuf_files
 cert_basename=$(basename $cert_file)
 key_basename=$(basename $key_file)
 
-cmd_string="export QLOGDIR=/server-data/$idx/ && export RUST_BACKTRACE=1 && export SSLKEYLOGFILE=/server-data/$idx/sslkeyfile && quiche-server --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key 2>&1 | tee /server-data/$idx/server.log"
+cmd_string="export QLOGDIR=/server-data/$idx/ && export RUST_BACKTRACE=1 && export SSLKEYLOGFILE=/server-data/$idx/sslkeyfile && quiche-server --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key --priorities-json /server-data/$idx/priorities.json 2>&1 | tee /server-data/$idx/server.log"
 
 docker exec -d quiche-server bash -c "echo \"$cmd_string\" > /server-data/$idx/start-server.sh"
 
