@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::to_writer;
 use std::fs::File;
 use std::io::Result;
+use crate::custom_cache;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PriorityLogMsg {
@@ -10,6 +11,7 @@ pub struct PriorityLogMsg {
     pub incremental: bool,
     pub headers: Vec<(String, String)>,
     pub content_type: String,
+    pub cache_key: custom_cache::CacheKey
 }
 
 // This is a sort of class:
@@ -33,7 +35,7 @@ impl PriorityLogger {
     // all it does it create a PriorityLogMsg object from the args, and pushes it
     pub fn add_msg(
         &mut self, stream_id: u64, priority: &quiche::h3::Priority,
-        headers: Vec<(String, String)>, content_type: String,
+        headers: Vec<(String, String)>, content_type: String, cache_key: custom_cache::CacheKey
     ) {
         let (urg, inc) = priority.get_fields();
         let log_msg = PriorityLogMsg {
@@ -42,6 +44,7 @@ impl PriorityLogger {
             incremental: inc,
             headers,
             content_type,
+            cache_key
         };
         self.msgs.push(log_msg);
     }

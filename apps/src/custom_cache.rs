@@ -6,8 +6,9 @@ use std::fs::File;
 use std::fs;
 use std::collections::HashMap;
 use crate::http_record;
+use serde::{Deserialize, Serialize};
 
-#[derive(Hash, Eq, PartialEq, Debug)]
+#[derive(Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct CacheKey {
     pub method: String,
     pub keyuri: String,

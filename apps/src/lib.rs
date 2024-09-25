@@ -33,6 +33,6 @@ pub mod client;
 pub mod common;
 pub mod custom_cache;
 pub mod http_record;
-pub mod priority_logger;
+pub mod priority_engine;
 pub mod sendto;
 

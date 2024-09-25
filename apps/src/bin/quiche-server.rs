@@ -51,7 +51,7 @@ use quiche_apps::sendto::*;
 
 use quiche_apps::custom_cache;
 
-use quiche_apps::priority_logger;
+use quiche_apps::priority_engine;
 
 const MAX_BUF_SIZE: usize = 65507;
 
@@ -81,7 +81,7 @@ fn main() {
     }
     // setup our priority logger
     let mut priority_logger =
-        priority_logger::PriorityLogger::new(priorities_json);
+        priority_engine::PriorityLogger::new(priorities_json);
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();

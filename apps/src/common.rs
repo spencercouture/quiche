@@ -29,7 +29,7 @@
 //! This module provides some utility functions that are common to quiche
 //! applications.
 use crate::custom_cache;
-use crate::priority_logger;
+use crate::priority_engine;
 
 use std::io::prelude::*;
 
@@ -356,7 +356,7 @@ pub trait HttpConn {
             custom_cache::CacheKey,
             Vec<custom_cache::CacheEntry>,
         >,
-        priority_logger: &mut priority_logger::PriorityLogger,
+        priority_logger: &mut priority_engine::PriorityLogger,
     ) -> quiche::h3::Result<()>;
 
     fn handle_writable(
@@ -578,7 +578,7 @@ impl HttpConn for Http09Conn {
             custom_cache::CacheKey,
             Vec<custom_cache::CacheEntry>,
         >,
-        _priority_logger: &mut priority_logger::PriorityLogger,
+        _priority_logger: &mut priority_engine::PriorityLogger,
     ) -> quiche::h3::Result<()> {
         // Process all readable streams.
         for s in conn.readable() {
@@ -906,6 +906,7 @@ impl Http3Conn {
             custom_cache::CacheKey,
             Vec<custom_cache::CacheEntry>,
         >,
+        cache_key: &mut custom_cache::CacheKey
     ) -> Http3ResponseBuilderResult {
         let mut scheme = None;
         let mut host = None;
@@ -1036,16 +1037,13 @@ impl Http3Conn {
                 )),
         };
 
-        // build our cache_key
+        // instead of building our own cache_key, modify the passed argument
         let og_path = path.expect("error with path").to_string();
         let keyuri = og_path.split("?").collect::<Vec<_>>()[0];
-
-        let cache_key = custom_cache::CacheKey{
-            method: method.expect("error with method").to_string(),
-            keyuri: keyuri.to_string(),
-            host: decided_host.to_string(),
-            https: is_https
-        };
+        cache_key.method = method.expect("error with method").to_string();
+        cache_key.keyuri = keyuri.to_string();
+        cache_key.host = decided_host.to_string();
+        cache_key.https = is_https;
 
         println!("CACHE_KEY: {:?}", cache_key);
         
@@ -1417,7 +1415,7 @@ impl HttpConn for Http3Conn {
             custom_cache::CacheKey,
             Vec<custom_cache::CacheEntry>,
         >,
-        priority_logger: &mut priority_logger::PriorityLogger,
+        priority_logger: &mut priority_engine::PriorityLogger,
     ) -> quiche::h3::Result<()> {
         // Process HTTP stream-related events.
         loop {
@@ -1440,12 +1438,21 @@ impl HttpConn for Http3Conn {
                     conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                         .unwrap();
 
+                    // pass "default" cache_key so we can access it after the function call
+                    let mut cache_key = custom_cache::CacheKey{
+                        method: "".to_string(),
+                        keyuri: "".to_string(),
+                        host: "".to_string(),
+                        https: false
+                    };
+
                     let (mut headers, body, mut priority) =
                         match Http3Conn::build_h3_response(
                             root,
                             index,
                             &list,
                             protobuf_cache,
+                            &mut cache_key
                         ) {
                             Ok(v) => v,
 
@@ -1520,6 +1527,7 @@ impl HttpConn for Http3Conn {
                         &priority,
                         hdrs_to_strings(&list),
                         content_type,
+                        cache_key
                     );
 
                     // info!("resource_priority ### {} ### {:?} ### {:?} ### {}",
