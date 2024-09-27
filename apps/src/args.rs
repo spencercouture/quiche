@@ -91,8 +91,9 @@ impl Args for CommonArgs {
         let (alpns, dgrams_enabled) = match (http_version, dgram_proto) {
             ("HTTP/0.9", "none") => (alpns::HTTP_09.to_vec(), false),
 
-            ("HTTP/0.9", _) =>
-                panic!("Unsupported HTTP version and DATAGRAM protocol."),
+            ("HTTP/0.9", _) => {
+                panic!("Unsupported HTTP version and DATAGRAM protocol.")
+            },
 
             ("HTTP/3", "none") => (alpns::HTTP_3.to_vec(), false),
 
@@ -436,7 +437,8 @@ Options:
   --listen <addr>             Listen on the given IP:port [default: 127.0.0.1:4433]
   --cert <file>               TLS certificate path [default: src/bin/cert.crt]
   --key <file>                TLS certificate key path [default: src/bin/cert.key]
-  --priorities-json <file>    Where to write PriorityLogMsg JSON output to
+  --priorities-output <file>  Where to write PriorityLogMsg JSON output to
+  --priorities-input <file>   The custom-formatted JSON file to read priority values from. See priority_engine.rs (same format as priorities_output)
   --root <dir>                Root directory [default: src/bin/root/]
   --index <name>              The file that will be used as index [default: index.html].
   --name <str>                Name of the server [default: quic.tech]
@@ -475,7 +477,8 @@ pub struct ServerArgs {
     pub root: String,
     pub index: String,
     pub cert: String,
-    pub priorities_json: String,
+    pub priorities_output: String,
+    pub priorities_input: String,
     pub key: String,
     pub disable_gso: bool,
     pub disable_pacing: bool,
@@ -491,7 +494,8 @@ impl Args for ServerArgs {
         let root = args.get_str("--root").to_string();
         let index = args.get_str("--index").to_string();
         let cert = args.get_str("--cert").to_string();
-        let priorities_json = args.get_str("--priorities-json").to_string();
+        let priorities_output = args.get_str("--priorities-output").to_string();
+        let priorities_input = args.get_str("--priorities-input").to_string();
         let key = args.get_str("--key").to_string();
         let disable_gso = args.get_bool("--disable-gso");
         let disable_pacing = args.get_bool("--disable-pacing");
@@ -503,7 +507,8 @@ impl Args for ServerArgs {
             root,
             index,
             cert,
-            priorities_json,
+            priorities_output,
+            priorities_input,
             key,
             disable_gso,
             disable_pacing,

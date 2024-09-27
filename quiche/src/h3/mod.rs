@@ -430,50 +430,50 @@ pub enum Error {
 pub enum WireErrorCode {
     /// No error. This is used when the connection or stream needs to be closed,
     /// but there is no error to signal.
-    NoError              = 0x100,
+    NoError = 0x100,
     /// Peer violated protocol requirements in a way that does not match a more
     /// specific error code or endpoint declines to use the more specific
     /// error code.
     GeneralProtocolError = 0x101,
     /// An internal error has occurred in the HTTP stack.
-    InternalError        = 0x102,
+    InternalError = 0x102,
     /// The endpoint detected that its peer created a stream that it will not
     /// accept.
-    StreamCreationError  = 0x103,
+    StreamCreationError = 0x103,
     /// A stream required by the HTTP/3 connection was closed or reset.
     ClosedCriticalStream = 0x104,
     /// A frame was received that was not permitted in the current state or on
     /// the current stream.
-    FrameUnexpected      = 0x105,
+    FrameUnexpected = 0x105,
     /// A frame that fails to satisfy layout requirements or with an invalid
     /// size was received.
-    FrameError           = 0x106,
+    FrameError = 0x106,
     /// The endpoint detected that its peer is exhibiting a behavior that might
     /// be generating excessive load.
-    ExcessiveLoad        = 0x107,
+    ExcessiveLoad = 0x107,
     /// A stream ID or push ID was used incorrectly, such as exceeding a limit,
     /// reducing a limit, or being reused.
-    IdError              = 0x108,
+    IdError = 0x108,
     /// An endpoint detected an error in the payload of a SETTINGS frame.
-    SettingsError        = 0x109,
+    SettingsError = 0x109,
     /// No SETTINGS frame was received at the beginning of the control stream.
-    MissingSettings      = 0x10a,
+    MissingSettings = 0x10a,
     /// A server rejected a request without performing any application
     /// processing.
-    RequestRejected      = 0x10b,
+    RequestRejected = 0x10b,
     /// The request or its response (including pushed response) is cancelled.
-    RequestCancelled     = 0x10c,
+    RequestCancelled = 0x10c,
     /// The client's stream terminated without containing a fully formed
     /// request.
-    RequestIncomplete    = 0x10d,
+    RequestIncomplete = 0x10d,
     /// An HTTP message was malformed and cannot be processed.
-    MessageError         = 0x10e,
+    MessageError = 0x10e,
     /// The TCP connection established in response to a CONNECT request was
     /// reset or abnormally closed.
-    ConnectError         = 0x10f,
+    ConnectError = 0x10f,
     /// The requested operation cannot be served over HTTP/3. The peer should
     /// retry over HTTP/1.1.
-    VersionFallback      = 0x110,
+    VersionFallback = 0x110,
 }
 
 impl Error {
@@ -481,10 +481,12 @@ impl Error {
         match self {
             Error::Done => WireErrorCode::NoError as u64,
             Error::InternalError => WireErrorCode::InternalError as u64,
-            Error::StreamCreationError =>
-                WireErrorCode::StreamCreationError as u64,
-            Error::ClosedCriticalStream =>
-                WireErrorCode::ClosedCriticalStream as u64,
+            Error::StreamCreationError => {
+                WireErrorCode::StreamCreationError as u64
+            },
+            Error::ClosedCriticalStream => {
+                WireErrorCode::ClosedCriticalStream as u64
+            },
             Error::FrameUnexpected => WireErrorCode::FrameUnexpected as u64,
             Error::FrameError => WireErrorCode::FrameError as u64,
             Error::ExcessiveLoad => WireErrorCode::ExcessiveLoad as u64,
@@ -655,8 +657,8 @@ impl Config {
         let dedup_settings: HashSet<u64> =
             additional_settings.iter().map(|(key, _)| *key).collect();
 
-        if dedup_settings.len() != additional_settings.len() ||
-            !explicit_quiche_settings.is_disjoint(&dedup_settings)
+        if dedup_settings.len() != additional_settings.len()
+            || !explicit_quiche_settings.is_disjoint(&dedup_settings)
         {
             return Err(Error::SettingsError);
         }
@@ -808,7 +810,7 @@ pub enum Event {
 /// Structured Fields Dictionary field value. I.e, use `TryFrom` to parse the
 /// value of a Priority header field or a PRIORITY_UPDATE frame. Using this
 /// trait requires the `sfv` feature to be enabled.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[repr(C)]
 pub struct Priority {
     urgency: u8,
@@ -875,8 +877,8 @@ impl TryFrom<&[u8]> for Priority {
             // other streams.
             Some(sfv::ListEntry::Item(item)) => match item.bare_item.as_int() {
                 Some(v) => {
-                    if !(PRIORITY_URGENCY_LOWER_BOUND as i64..=
-                        PRIORITY_URGENCY_UPPER_BOUND as i64)
+                    if !(PRIORITY_URGENCY_LOWER_BOUND as i64
+                        ..=PRIORITY_URGENCY_UPPER_BOUND as i64)
                         .contains(&v)
                     {
                         PRIORITY_URGENCY_UPPER_BOUND
@@ -895,8 +897,9 @@ impl TryFrom<&[u8]> for Priority {
         };
 
         let incremental = match dict.get("i") {
-            Some(sfv::ListEntry::Item(item)) =>
-                item.bare_item.as_bool().ok_or(Error::Done)?,
+            Some(sfv::ListEntry::Item(item)) => {
+                item.bare_item.as_bool().ok_or(Error::Done)?
+            },
 
             // Omitted so use default value.
             _ => false,
@@ -1175,8 +1178,8 @@ impl Connection {
         // Clamp and shift urgency into quiche-priority space
         let urgency = priority
             .urgency
-            .clamp(PRIORITY_URGENCY_LOWER_BOUND, PRIORITY_URGENCY_UPPER_BOUND) +
-            PRIORITY_URGENCY_OFFSET;
+            .clamp(PRIORITY_URGENCY_LOWER_BOUND, PRIORITY_URGENCY_UPPER_BOUND)
+            + PRIORITY_URGENCY_OFFSET;
 
         conn.stream_priority(stream_id, urgency, priority.incremental)?;
 
@@ -1215,8 +1218,8 @@ impl Connection {
 
         let header_block = self.encode_header_block(headers)?;
 
-        let overhead = octets::varint_len(frame::HEADERS_FRAME_TYPE_ID) +
-            octets::varint_len(header_block.len() as u64);
+        let overhead = octets::varint_len(frame::HEADERS_FRAME_TYPE_ID)
+            + octets::varint_len(header_block.len() as u64);
 
         // Headers need to be sent atomically, so make sure the stream has
         // enough capacity.
@@ -1310,10 +1313,11 @@ impl Connection {
         }
 
         match self.streams.get(&stream_id) {
-            Some(s) =>
+            Some(s) => {
                 if !s.local_initialized() {
                     return Err(Error::FrameUnexpected);
-                },
+                }
+            },
 
             None => {
                 return Err(Error::FrameUnexpected);
@@ -1325,8 +1329,8 @@ impl Connection {
             return Err(Error::Done);
         }
 
-        let overhead = octets::varint_len(frame::DATA_FRAME_TYPE_ID) +
-            octets::varint_len(body.len() as u64);
+        let overhead = octets::varint_len(frame::DATA_FRAME_TYPE_ID)
+            + octets::varint_len(body.len() as u64);
 
         let stream_cap = match conn.stream_capacity(stream_id) {
             Ok(v) => v,
@@ -1413,8 +1417,8 @@ impl Connection {
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
     pub fn dgram_enabled_by_peer(&self, conn: &super::Connection) -> bool {
-        self.peer_settings.h3_datagram == Some(1) &&
-            conn.dgram_max_writable_len().is_some()
+        self.peer_settings.h3_datagram == Some(1)
+            && conn.dgram_max_writable_len().is_some()
     }
 
     /// Returns whether the peer enabled extended CONNECT support.
@@ -1547,9 +1551,9 @@ impl Connection {
             octets::varint_len(stream_id) + priority_field_value.len();
 
         let overhead =
-            octets::varint_len(frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID) +
-                octets::varint_len(stream_id) +
-                octets::varint_len(frame_payload_len as u64);
+            octets::varint_len(frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID)
+                + octets::varint_len(stream_id)
+                + octets::varint_len(frame_payload_len as u64);
 
         // Make sure the control stream has enough capacity.
         match conn.stream_writable(
@@ -1717,8 +1721,9 @@ impl Connection {
 
                 // Return early if the stream was reset, to avoid returning
                 // a Finished event later as well.
-                Err(Error::TransportError(crate::Error::StreamReset(e))) =>
-                    return Ok((s, Event::Reset(e))),
+                Err(Error::TransportError(crate::Error::StreamReset(e))) => {
+                    return Ok((s, Event::Reset(e)))
+                },
 
                 Err(e) => return Err(e),
             };
@@ -1837,9 +1842,9 @@ impl Connection {
 
         match ty {
             // Control and QPACK streams are the most important to schedule.
-            stream::HTTP3_CONTROL_STREAM_TYPE_ID |
-            stream::QPACK_ENCODER_STREAM_TYPE_ID |
-            stream::QPACK_DECODER_STREAM_TYPE_ID => {
+            stream::HTTP3_CONTROL_STREAM_TYPE_ID
+            | stream::QPACK_ENCODER_STREAM_TYPE_ID
+            | stream::QPACK_DECODER_STREAM_TYPE_ID => {
                 conn.stream_priority(stream_id, 0, false)?;
             },
 
@@ -2566,8 +2571,9 @@ impl Connection {
 
                     Err(e) => {
                         let e = match e {
-                            qpack::Error::HeaderListTooLarge =>
-                                Error::ExcessiveLoad,
+                            qpack::Error::HeaderListTooLarge => {
+                                Error::ExcessiveLoad
+                            },
 
                             _ => Error::QpackDecompressionFailed,
                         };
@@ -2604,10 +2610,13 @@ impl Connection {
 
                 let has_body = !conn.stream_finished(stream_id);
 
-                return Ok((stream_id, Event::Headers {
-                    list: headers,
-                    has_body,
-                }));
+                return Ok((
+                    stream_id,
+                    Event::Headers {
+                        list: headers,
+                        has_body,
+                    },
+                ));
             },
 
             frame::Frame::Data { .. } => {
@@ -4151,10 +4160,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4169,10 +4182,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4180,10 +4197,14 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 5,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 5,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4195,10 +4216,14 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 7,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 7,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4217,10 +4242,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4228,10 +4257,14 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 4, &Priority {
-                urgency: 1,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                4,
+                &Priority {
+                    urgency: 1,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4239,10 +4272,14 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 8, &Priority {
-                urgency: 2,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                8,
+                &Priority {
+                    urgency: 2,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4313,10 +4350,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4348,10 +4389,14 @@ mod tests {
 
         // Now send a PRIORITY_UPDATE for the completed request stream.
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4367,10 +4412,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 
@@ -4404,10 +4453,14 @@ mod tests {
 
         // Now send a PRIORITY_UPDATE for the closed request stream.
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
-                urgency: 3,
-                incremental: false,
-            })
+            .send_priority_update_for_request(
+                &mut s.pipe.client,
+                0,
+                &Priority {
+                    urgency: 3,
+                    incremental: false,
+                },
+            )
             .unwrap();
         s.advance().ok();
 

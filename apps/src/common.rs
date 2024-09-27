@@ -29,7 +29,7 @@
 //! This module provides some utility functions that are common to quiche
 //! applications.
 use crate::custom_cache;
-use crate::priority_engine;
+use crate::priority_engine::PriorityContext;
 
 use std::io::prelude::*;
 
@@ -351,12 +351,7 @@ pub trait HttpConn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
-        protobuf_cache: &mut HashMap<
-            custom_cache::CacheKey,
-            Vec<custom_cache::CacheEntry>,
-        >,
-        priority_logger: &mut priority_engine::PriorityLogger,
+        index: &str, buf: &mut [u8], priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()>;
 
     fn handle_writable(
@@ -573,12 +568,7 @@ impl HttpConn for Http09Conn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
-        _protobuf_cache: &mut HashMap<
-            custom_cache::CacheKey,
-            Vec<custom_cache::CacheEntry>,
-        >,
-        _priority_logger: &mut priority_engine::PriorityLogger,
+        index: &str, buf: &mut [u8], _priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()> {
         // Process all readable streams.
         for s in conn.readable() {
@@ -902,11 +892,8 @@ impl Http3Conn {
     /// Builds an HTTP/3 response given a request.
     fn build_h3_response(
         _root: &str, _index: &str, request: &[quiche::h3::Header],
-        protobuf_cache: &mut HashMap<
-            custom_cache::CacheKey,
-            Vec<custom_cache::CacheEntry>,
-        >,
-        cache_key: &mut custom_cache::CacheKey
+        priority_context: &mut PriorityContext,
+        cache_key: &mut custom_cache::CacheKey,
     ) -> Http3ResponseBuilderResult {
         let mut scheme = None;
         let mut host = None;
@@ -916,7 +903,6 @@ impl Http3Conn {
         let mut ifnonematch = None;
         let mut priority = vec![];
 
-        
         // Parse some of the request headers.
         for hdr in request {
             match hdr.name() {
@@ -953,7 +939,6 @@ impl Http3Conn {
                     method = Some(std::str::from_utf8(hdr.value()).unwrap())
                 },
 
-
                 b":authority" => {
                     if authority.is_some() {
                         return Err((
@@ -980,31 +965,34 @@ impl Http3Conn {
             }
         }
 
-
         let decided_host = match (authority, host) {
-            (None, Some("")) =>
+            (None, Some("")) => {
                 return Err((
                     H3_MESSAGE_ERROR,
                     "host value cannot be empty".to_string(),
-                )),
+                ))
+            },
 
-            (Some(""), None) =>
+            (Some(""), None) => {
                 return Err((
                     H3_MESSAGE_ERROR,
                     ":authority value cannot be empty".to_string(),
-                )),
+                ))
+            },
 
-            (Some(""), Some("")) =>
+            (Some(""), Some("")) => {
                 return Err((
                     H3_MESSAGE_ERROR,
                     ":authority and host value cannot be empty".to_string(),
-                )),
+                ))
+            },
 
-            (None, None) =>
+            (None, None) => {
                 return Err((
                     H3_MESSAGE_ERROR,
                     ":authority and host missing".to_string(),
-                )),
+                ))
+            },
 
             // Any other combo, prefer :authority
             (..) => authority.unwrap(),
@@ -1018,23 +1006,28 @@ impl Http3Conn {
         //     https: false
         // };
 
-        // setup fields for cache key  
+        // setup fields for cache key
         let is_https = match scheme {
             Some(scheme) => {
                 if scheme != "http" && scheme != "https" {
                     return Err((
                         H3_MESSAGE_ERROR,
                         ":scheme is not http or https".to_string(),
-                    ))
+                    ));
                 }
-                if scheme == "https" { true } else { false }
+                if scheme == "https" {
+                    true
+                } else {
+                    false
+                }
             },
 
-            None =>
+            None => {
                 return Err((
                     H3_MESSAGE_ERROR,
                     ":scheme cannot be missing".to_string(),
-                )),
+                ))
+            },
         };
 
         // instead of building our own cache_key, modify the passed argument
@@ -1046,22 +1039,29 @@ impl Http3Conn {
         cache_key.https = is_https;
 
         println!("CACHE_KEY: {:?}", cache_key);
-        
-        let entries = match protobuf_cache.get(&cache_key) {
+
+        let entries = match priority_context.cache.get(&cache_key) {
             Some(ent) => ent,
             None => {
                 println!("ERROR, no entries found for key: {:?}", cache_key);
                 // if we found no entries, throw error?
                 let headers = vec![
-                    quiche::h3::Header::new(b":status", "404".to_string().as_bytes()),
+                    quiche::h3::Header::new(
+                        b":status",
+                        "404".to_string().as_bytes(),
+                    ),
                     quiche::h3::Header::new(b"server", b"quiche"),
                     quiche::h3::Header::new(
                         b"content-length",
                         "Not Found!".to_string().as_bytes(),
                     ),
                 ];
-                return Ok((headers, "Not Found!".to_string().as_bytes().to_vec(), Vec::new()));
-            }
+                return Ok((
+                    headers,
+                    "Not Found!".to_string().as_bytes().to_vec(),
+                    Vec::new(),
+                ));
+            },
         };
 
         println!("{} entries found.", entries.len());
@@ -1070,7 +1070,7 @@ impl Http3Conn {
         let mut best_fit = -1;
         let mut chosen_entry = None;
         println!("starting best fit algorithm...");
-        for (idx,entry) in entries.iter().enumerate() {
+        for (idx, entry) in entries.iter().enumerate() {
             let i_start = keyuri.len();
             let mut i_end = og_path.len();
             if i_end > entry.request_uri.len() {
@@ -1086,26 +1086,37 @@ impl Http3Conn {
                 fit += 1;
             }
 
-            println!("\tgot fit of {} while comparing og_path with entry.request_uri:", fit);
+            println!(
+                "\tgot fit of {} while comparing og_path with entry.request_uri:",
+                fit
+            );
             println!("\t\t{}  w/   {}", og_path, entry.request_uri);
 
             if fit >= best_fit {
                 // if we have a ifnonematch value in the request header, and one in the entry, make sure they match
-                if let (Some((_,ifnonematch_val)), Some(ifnonematch_hash)) = (entry.request_headers.get("if-none-match"), ifnonematch) {
-                    if ifnonematch_val == ifnonematch_hash && entry.response_status == 304 {
-                        println!("\tfound a matching ifnonematch hash! {}", ifnonematch_hash);
+                if let (Some((_, ifnonematch_val)), Some(ifnonematch_hash)) =
+                    (entry.request_headers.get("if-none-match"), ifnonematch)
+                {
+                    if ifnonematch_val == ifnonematch_hash
+                        && entry.response_status == 304
+                    {
+                        println!(
+                            "\tfound a matching ifnonematch hash! {}",
+                            ifnonematch_hash
+                        );
                         chosen_entry = Some(entry);
                         break;
                     }
-                }
-                else if entry.response_status == 200 {
+                } else if entry.response_status == 200 {
                     println!("\tentry's is 200");
                     println!("\t\tupdating best_fit to entry index {}", idx);
                     best_fit = fit;
                     chosen_entry = Some(entry);
-                }
-                else if fit > best_fit {
-                    println!("\tfit({}) is better than best_fit({})", fit, best_fit);
+                } else if fit > best_fit {
+                    println!(
+                        "\tfit({}) is better than best_fit({})",
+                        fit, best_fit
+                    );
                     println!("\t\tupdating best_fit to entry index {}", idx);
                     best_fit = fit;
                     chosen_entry = Some(entry);
@@ -1114,16 +1125,21 @@ impl Http3Conn {
         }
         println!("ending best fit algorithm.");
 
-
         // always return the first entry?
         let res = chosen_entry.unwrap();
         // build headers
         let mut headers = Vec::new();
 
         println!("sending back headers:");
-        headers.push(quiche::h3::Header::new(b":status", res.response_status.to_string().as_bytes()));
+        headers.push(quiche::h3::Header::new(
+            b":status",
+            res.response_status.to_string().as_bytes(),
+        ));
         for (rheader1, rheader2) in res.response_headers.iter() {
-            headers.push(quiche::h3::Header::new(rheader1.as_bytes(), rheader2.as_bytes()));
+            headers.push(quiche::h3::Header::new(
+                rheader1.as_bytes(),
+                rheader2.as_bytes(),
+            ));
             println!("\t{}\n\t\t{}", rheader1, rheader2);
         }
         println!("");
@@ -1282,14 +1298,15 @@ impl HttpConn for Http3Conn {
                                 rw.write_all(&buf[..read]).ok();
                             },
 
-                            None =>
+                            None => {
                                 if !self.dump_json {
                                     self.output_sink.borrow_mut()(unsafe {
                                         String::from_utf8_unchecked(
                                             buf[..read].to_vec(),
                                         )
                                     });
-                                },
+                                }
+                            },
                         }
                     }
                 },
@@ -1410,12 +1427,7 @@ impl HttpConn for Http3Conn {
         &mut self, conn: &mut quiche::Connection,
         _partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
-        protobuf_cache: &mut HashMap<
-            custom_cache::CacheKey,
-            Vec<custom_cache::CacheEntry>,
-        >,
-        priority_logger: &mut priority_engine::PriorityLogger,
+        index: &str, buf: &mut [u8], priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()> {
         // Process HTTP stream-related events.
         loop {
@@ -1439,11 +1451,11 @@ impl HttpConn for Http3Conn {
                         .unwrap();
 
                     // pass "default" cache_key so we can access it after the function call
-                    let mut cache_key = custom_cache::CacheKey{
+                    let mut cache_key = custom_cache::CacheKey {
                         method: "".to_string(),
                         keyuri: "".to_string(),
                         host: "".to_string(),
-                        https: false
+                        https: false,
                     };
 
                     let (mut headers, body, mut priority) =
@@ -1451,8 +1463,8 @@ impl HttpConn for Http3Conn {
                             root,
                             index,
                             &list,
-                            protobuf_cache,
-                            &mut cache_key
+                            priority_context,
+                            &mut cache_key,
                         ) {
                             Ok(v) => v,
 
@@ -1482,15 +1494,8 @@ impl HttpConn for Http3Conn {
                         ),
                     }
 
-                    if !priority.is_empty() {
-                        headers.push(quiche::h3::Header::new(
-                            b"priority",
-                            priority.as_slice(),
-                        ));
-                    }
-
                     #[cfg(feature = "sfv")]
-                    let priority =
+                    let mut priority =
                         match quiche::h3::Priority::try_from(priority.as_slice())
                         {
                             Ok(v) => v,
@@ -1499,6 +1504,18 @@ impl HttpConn for Http3Conn {
 
                     #[cfg(not(feature = "sfv"))]
                     let priority = quiche::h3::Priority::default();
+
+                    // modify the priority using our context
+                    priority_context.modify_priority(priority.clone(), cache_key.clone());
+                    let (u,i) = priority.get_fields();
+                    // build the string so we can add it to the header
+                    let prio_str = if i { format!("u={}, i", u) } else { format!("u={}", u) };
+                    headers.push(quiche::h3::Header::new(
+                        b"priority",
+                        prio_str.as_bytes(),
+                    ));
+                    priority_context.serialize_map();
+                    
 
                     // this looks like it pulls the priority update for the stream, if it was
                     // received before the request. if so, it pushes the "priority" header?
@@ -1516,18 +1533,19 @@ impl HttpConn for Http3Conn {
                     for i in headers.iter_mut() {
                         // let quiche::h3::Header(headk, headv) = i;
                         let headn = String::from_utf8(i.name().to_vec()).unwrap();
-                        let headv = String::from_utf8(i.value().to_vec()).unwrap();
+                        let headv =
+                            String::from_utf8(i.value().to_vec()).unwrap();
                         if headn == "content-type" {
                             content_type = headv;
                         }
                     }
 
-                    priority_logger.add_msg(
+                    priority_context.logger.add_msg(
                         stream_id,
                         &priority,
                         hdrs_to_strings(&list),
                         content_type,
-                        cache_key
+                        cache_key,
                     );
 
                     // info!("resource_priority ### {} ### {:?} ### {:?} ### {}",

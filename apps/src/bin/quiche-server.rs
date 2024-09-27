@@ -41,6 +41,8 @@ use std::rc::Rc;
 
 use std::cell::RefCell;
 
+use quiche_apps::custom_cache::CacheKey;
+use quiche_apps::priority_engine::read_priority_map;
 use ring::rand::*;
 
 use quiche_apps::args::*;
@@ -59,10 +61,6 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
     // get protobuf-populated cache
-    let mut cache: HashMap<
-        custom_cache::CacheKey,
-        Vec<custom_cache::CacheEntry>,
-    > = custom_cache::get_cache();
 
     let mut buf = [0; MAX_BUF_SIZE];
     let mut out = [0; MAX_BUF_SIZE];
@@ -75,13 +73,19 @@ fn main() {
     let conn_args = CommonArgs::with_docopt(&docopt);
     let args = ServerArgs::with_docopt(&docopt);
 
-    let mut priorities_json = args.priorities_json;
-    if priorities_json.is_empty() {
-        priorities_json.push_str("/priorities.json");
-    }
-    // setup our priority logger
-    let mut priority_logger =
-        priority_engine::PriorityLogger::new(priorities_json);
+    // if the cache-output flag was supplied, serialize the cache there
+    // let cache_output = args.cache_output;
+    // if !cache_output.is_empty() {
+    //     if let Err(e) = serialize_cache(cache_output, &cache) {
+    //         println!("Error serializing cache: {:?}", e);
+    //     }
+    // }
+
+    // parse our arguments and setup our PriorityContext
+    let mut priority_context =
+        priority_engine::PriorityContext::new(args.priorities_output.clone());
+    priority_context.output_loc = args.priorities_output;
+    priority_context.input_loc = args.priorities_input;
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
@@ -285,8 +289,8 @@ fn main() {
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let client = if !clients_ids.contains_key(&hdr.dcid) &&
-                !clients_ids.contains_key(&conn_id)
+            let client = if !clients_ids.contains_key(&hdr.dcid)
+                && !clients_ids.contains_key(&conn_id)
             {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
@@ -455,9 +459,9 @@ fn main() {
 
             // Create a new application protocol session as soon as the QUIC
             // connection is established.
-            if !client.app_proto_selected &&
-                (client.conn.is_in_early_data() ||
-                    client.conn.is_established())
+            if !client.app_proto_selected
+                && (client.conn.is_in_early_data()
+                    || client.conn.is_established())
             {
                 // At this stage the ALPN negotiation succeeded and selected a
                 // single application protocol name. We'll use this to construct
@@ -526,15 +530,14 @@ fn main() {
                         &args.root,
                         &args.index,
                         &mut buf,
-                        &mut cache,
-                        &mut priority_logger,
+                        &mut priority_context,
                     )
                     .is_err()
                 {
                     continue 'read;
                 }
                 // write our JSON file
-                match priority_logger.write_to_json() {
+                match priority_context.logger.write_to_json() {
                     Ok(_) => info!("updated priorities JSON file"),
                     Err(_) => info!("error writing to priorities JSON file"),
                 }
@@ -576,9 +579,9 @@ fn main() {
             }
 
             let max_send_burst =
-                client.conn.send_quantum().min(client.max_send_burst) /
-                    client.max_datagram_size *
-                    client.max_datagram_size;
+                client.conn.send_quantum().min(client.max_send_burst)
+                    / client.max_datagram_size
+                    * client.max_datagram_size;
             let mut total_write = 0;
             let mut dst_info = None;
 
