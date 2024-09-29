@@ -1,11 +1,13 @@
 use crate::custom_cache;
+use crate::custom_cache::CacheKey;
 use crate::priority_engine;
-use quiche::h3::Priority;
 use serde::{Deserialize, Serialize};
-use serde_json::to_writer;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Result};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Result};
+use std::io::{ErrorKind, Write};
+use std::path::Path;
 
 pub struct PriorityContext {
     pub cache: HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>,
@@ -15,7 +17,7 @@ pub struct PriorityContext {
     pub logger: priority_engine::PriorityLogger,
 
     pub output_loc: String,
-    pub input_loc: String,
+    pub read_from_input: bool,
 }
 impl PriorityContext {
     pub fn new(dir_path: String) -> Self {
@@ -23,22 +25,85 @@ impl PriorityContext {
             cache: custom_cache::get_cache(),
             logger: priority_engine::PriorityLogger::new(dir_path),
             map: HashMap::new(),
-            output_loc: "/".to_string(),
-            input_loc: "/".to_string(),
+            output_loc: "".to_string(),
+            read_from_input: false,
         }
     }
 
-    pub fn modify_priority( &mut self, priority: quiche::h3::Priority, cache_key: custom_cache::CacheKey )  {
-        self.map.insert(cache_key, priority.get_fields());
+    pub fn load_priorities(&mut self, file_path: String) -> Result<String> {
+        if file_path.is_empty() {
+            return Ok("".to_string());
+        }
+
+        let path = Path::new(&file_path);
+        let file = File::open(&path)?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            if let Ok(tup) = serde_json::from_str::<(CacheKey, u8, bool)>(&line) {
+                info!("read in object: {:?}", tup);
+                let (ck, u, i) = tup;
+                self.map.insert(ck, (u, i));
+            } else {
+                continue;
+            }
+        }
+
+        self.read_from_input = true;
+
+        Ok("".to_string())
     }
 
-    pub fn serialize_map(&mut self) -> Result<()> {
+    pub fn map_priority(
+        &mut self, priority: &quiche::h3::Priority,
+        cache_key: custom_cache::CacheKey,
+    ) -> Result<quiche::h3::Priority> {
+        // check if we supplied an input... if we did, read from it
+        if self.read_from_input {
+            if let Some(tup) = self.map.get(&cache_key) {
+                info!("found prio map match: {:?}", tup);
+                let (u, i) = tup;
+                return Ok(quiche::h3::Priority::new(u.clone(), i.clone()));
+            } else {
+                let err = std::io::Error::new(
+                    ErrorKind::NotFound,
+                    "no match in map...",
+                );
+                return Err(err);
+            }
+        }
 
-        let file = File::create(self.output_loc.clone())?;
-        to_writer(file, &self.map)?;
+        self.map.insert(cache_key.clone(), priority.get_fields());
+        info!("inserting {:?}, {:?}", cache_key, priority);
 
-        Ok(())
+        // Open the file in append mode, create if it doesn't exist
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.output_loc.clone())?;
+
+        let (u, i) = priority.get_fields();
+        let logline = serde_json::to_string(&(cache_key, u, i)).unwrap();
+
+        // Write a line to the file
+        writeln!(file, "{}", logline)?;
+
+        Ok(quiche::h3::Priority::default())
     }
+
+    // pub fn serialize_map(&mut self) -> Result<()> {
+    //     let file = File::create(self.output_loc.clone())?;
+    //
+    //     let map_list: Vec<CacheKey, (u8, bool)> =
+    //         self.map.into_iter().collect().to_writer(file, &self.map)?;
+    //
+    //     Ok(())
+    // }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

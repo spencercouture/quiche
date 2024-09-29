@@ -41,8 +41,6 @@ use std::rc::Rc;
 
 use std::cell::RefCell;
 
-use quiche_apps::custom_cache::CacheKey;
-use quiche_apps::priority_engine::read_priority_map;
 use ring::rand::*;
 
 use quiche_apps::args::*;
@@ -50,8 +48,6 @@ use quiche_apps::args::*;
 use quiche_apps::common::*;
 
 use quiche_apps::sendto::*;
-
-use quiche_apps::custom_cache;
 
 use quiche_apps::priority_engine;
 
@@ -85,7 +81,10 @@ fn main() {
     let mut priority_context =
         priority_engine::PriorityContext::new(args.priorities_output.clone());
     priority_context.output_loc = args.priorities_output;
-    priority_context.input_loc = args.priorities_input;
+    match priority_context.load_priorities(args.priorities_input) {
+        Ok(_) => (),
+        Err(_) => info!("failed to read in priorities"),
+    }
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();

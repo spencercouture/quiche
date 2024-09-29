@@ -1495,7 +1495,7 @@ impl HttpConn for Http3Conn {
                     }
 
                     #[cfg(feature = "sfv")]
-                    let mut priority =
+                    let priority =
                         match quiche::h3::Priority::try_from(priority.as_slice())
                         {
                             Ok(v) => v,
@@ -1506,16 +1506,36 @@ impl HttpConn for Http3Conn {
                     let priority = quiche::h3::Priority::default();
 
                     // modify the priority using our context
-                    priority_context.modify_priority(priority.clone(), cache_key.clone());
-                    let (u,i) = priority.get_fields();
+                    // if we return an error, we use what was supplied (or default)
+                    let priority = match priority_context
+                        .map_priority(&priority, cache_key.clone())
+                    {
+                        Ok(p) => p,
+                        Err(_) => {
+                            info!("using prior priority! map returned nothing. using: {:?}", priority);
+                            priority
+                        },
+                    };
+
+                    let (u, i) = priority.get_fields();
                     // build the string so we can add it to the header
-                    let prio_str = if i { format!("u={}, i", u) } else { format!("u={}", u) };
+                    let prio_str = if i {
+                        format!("u={}, i", u)
+                    } else {
+                        format!("u={}", u)
+                    };
                     headers.push(quiche::h3::Header::new(
                         b"priority",
                         prio_str.as_bytes(),
                     ));
-                    priority_context.serialize_map();
-                    
+                    // match priority_context.serialize_map() {
+                    //     Ok(_) => {
+                    //         info!("succesfully serialized map");
+                    //     },
+                    //     Err(e) => {
+                    //         error!("unable to serialize map: {:?}", e);
+                    //     },
+                    // }
 
                     // this looks like it pulls the priority update for the stream, if it was
                     // received before the request. if so, it pushes the "priority" header?
