@@ -5,13 +5,16 @@ addr=$3
 idx=$4
 directory=$5
 
+# clean the directory if files are lingering...
+docker exec quiche-server rm -rf /server-data/$idk
 # move cert and key files over
 docker exec quiche-server mkdir -p /server-data/$idx
 docker cp $cert_file quiche-server:/server-data/$idx
 docker cp $key_file quiche-server:/server-data/$idx
 
-# move protobuf files over
-docker cp $directory/. quiche-server:/protobuf_files
+# move protobuf/static files over
+docker cp $directory/protobuf_files/. quiche-server:/protobuf_files
+docker cp $directory/static_files/. quiche-server:/static_files
 
 cert_basename=$(basename $cert_file)
 key_basename=$(basename $key_file)
