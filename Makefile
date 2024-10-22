@@ -11,6 +11,9 @@ FUZZ_TAG  = latest
 
 docker-build: docker-base docker-qns
 
+docker-protobuf-build: Dockerfile
+	$(DOCKER) build --no-cache --target quiche-base -t scouture/protobuf-quiche:latest .
+
 # build quiche-apps only
 .PHONY: build-apps
 build-apps:
@@ -19,7 +22,7 @@ build-apps:
 # build base image
 .PHONY: docker-base
 docker-base: Dockerfile
-	$(DOCKER) build --target quiche-base -t $(BASE_REPO):$(BASE_TAG) .
+	$(DOCKER) build --no-cache --target quiche-base -t $(BASE_REPO):$(BASE_TAG) .
 
 # build qns image
 .PHONY: docker-qns
