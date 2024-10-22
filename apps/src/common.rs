@@ -1437,7 +1437,7 @@ impl HttpConn for Http3Conn {
 
                     match self.h3_conn.take_last_priority_update(stream_id) {
                         Ok(v) => {
-                            print!("priority_log_message: tuke_last_priority_update - streamid={}, priority={:?}", stream_id, v);
+                            print!("priority_log_message: take_last_priority_update - streamid={}, priority={:?}", stream_id, v);
                             priority = v;
                         },
 
