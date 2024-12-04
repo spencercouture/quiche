@@ -19,7 +19,9 @@ docker cp $directory/static_files/. quiche-server:/static_files
 cert_basename=$(basename $cert_file)
 key_basename=$(basename $key_file)
 
-cmd_string="export QLOGDIR=/server-data/$idx/ && export RUST_BACKTRACE=1 && export SSLKEYLOGFILE=/server-data/$idx/sslkeyfile && quiche-server --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key 2>&1 | tee /server-data/$idx/server.log"
+env_vars="export QLOGDIR=/server-data/$idx/ && export RUST_BACKTRACE=1 && export SSLKEYLOGFILE=/server-data/$idx/sslkeyfile"
+quiche_args="--initial-cwnd-packets 100 --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key"
+cmd_string="$env_vars && quiche-server $quiche_args 2>&1 | tee /server-data/$idx/server.log"
 
 docker exec -d quiche-server bash -c "echo \"$cmd_string\" > /server-data/$idx/start-server.sh"
 
