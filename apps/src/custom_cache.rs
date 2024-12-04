@@ -163,7 +163,7 @@ pub fn get_cache() -> HashMap<CacheKey, Vec<CacheEntry>> {
             }
             
             // remove transfer-encoding to disable chunking
-            if !["expires", "date", "last-modified", "link", "alt-svc", "connection", "transfer-encoding"].iter().any(|&s| s == key_stripped) {
+            if !["expires", "date", "last-modified", "link", "alt-svc", "connection", "transfer-encoding", "keep-alive", "priority"].iter().any(|&s| s == key_stripped) {
                 response_headers.push((key, val));
             }
             else if key_stripped == "transfer-encoding" && val.contains("chunked") {
