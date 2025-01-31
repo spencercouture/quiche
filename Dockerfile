@@ -1,4 +1,4 @@
-FROM rust:1.67 as build
+FROM rust as build
 
 WORKDIR /build
 
@@ -46,5 +46,7 @@ COPY --from=build \
      ./
 
 ENV RUST_LOG=trace
+
+RUN mkdir -p /quiche/
 
 ENTRYPOINT [ "./run_endpoint.sh" ]
