@@ -2337,6 +2337,7 @@ impl Connection {
     }
 
     /// Returns true if a QUIC packet is a stateless reset.
+    #[allow(deprecated)]
     fn is_stateless_reset(&self, buf: &[u8]) -> bool {
         // If the packet is too small, then we just throw it away.
         let buf_len = buf.len();

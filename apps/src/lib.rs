@@ -34,3 +34,4 @@ pub mod common;
 pub mod sendto;
 pub mod http_record;
 pub mod custom_cache;
+pub mod priority_engine;

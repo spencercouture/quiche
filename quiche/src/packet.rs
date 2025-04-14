@@ -773,6 +773,7 @@ pub fn retry(
     Ok(b.off())
 }
 
+#[allow(deprecated)]
 pub fn verify_retry_integrity(
     b: &octets::OctetsMut, odcid: &[u8], version: u32,
 ) -> Result<()> {

@@ -29,6 +29,7 @@
 //! This module provides some utility functions that are common to quiche
 //! applications.
 use crate::custom_cache;
+use crate::priority_engine::PriorityContext;
 
 use std::io::prelude::*;
 
@@ -350,7 +351,7 @@ pub trait HttpConn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8], protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8], priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()>;
 
     fn handle_writable(
@@ -567,7 +568,7 @@ impl HttpConn for Http09Conn {
         &mut self, conn: &mut quiche::Connection,
         partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8], _protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8], _priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()> {
         // Process all readable streams.
         for s in conn.readable() {
@@ -890,7 +891,9 @@ impl Http3Conn {
 
     /// Builds an HTTP/3 response given a request.
     fn build_h3_response(
-        _root: &str, _index: &str, request: &[quiche::h3::Header],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        _root: &str, _index: &str, request: &[quiche::h3::Header],
+        priority_context: &mut PriorityContext,
+        cache_key: &mut custom_cache::CacheKey,
     ) -> Http3ResponseBuilderResult {
         let mut scheme = None;
         let mut authority = None;
@@ -970,7 +973,7 @@ impl Http3Conn {
             }
         }
 
-        let decided_method = match method {
+        let _decided_method = match method {
             Some(method) => {
                 match method {
                     "" =>
@@ -1003,7 +1006,7 @@ impl Http3Conn {
                 )),
         };
 
-        let is_https = match scheme {
+        let _is_https = match scheme {
             Some(scheme) => {
                 if scheme != "http" && scheme != "https" {
                     let headers = vec![
@@ -1075,19 +1078,41 @@ impl Http3Conn {
             Some(path) => path,
         };
 
-        // build our cache_key
-        let keyuri = decided_path.split("?").collect::<Vec<_>>()[0];
+        // setup fields for cache key
+        let is_https = match scheme {
+            Some(scheme) => {
+                if scheme != "http" && scheme != "https" {
+                    return Err((
+                        H3_MESSAGE_ERROR,
+                        ":scheme is not http or https".to_string(),
+                    ));
+                }
+                if scheme == "https" {
+                    true
+                } else {
+                    false
+                }
+            },
 
-        let cache_key = custom_cache::CacheKey{
-            method: method.expect("error with method").to_string(),
-            keyuri: keyuri.to_string(),
-            host: decided_host.to_string(),
-            https: is_https
+            None => {
+                return Err((
+                    H3_MESSAGE_ERROR,
+                    ":scheme cannot be missing".to_string(),
+                ))
+            },
         };
 
+        // instead of building our own cache_key, modify the passed argument
+        let og_path = path.expect("error with path").to_string();
+        let keyuri = og_path.split("?").collect::<Vec<_>>()[0];
+        cache_key.method = method.expect("error with method").to_string();
+        cache_key.keyuri = keyuri.to_string();
+        cache_key.host = decided_host.to_string();
+        cache_key.https = is_https;
+
         println!("CACHE_KEY: {:?}", cache_key);
-        
-        let entries = match protobuf_cache.get(&cache_key) {
+
+        let entries = match priority_context.cache.get(&cache_key) {
             Some(ent) => ent,
             None => {
                 println!("ERROR, no entries found for key: {:?}", cache_key);
@@ -1112,15 +1137,15 @@ impl Http3Conn {
         println!("starting best fit algorithm...");
         for (idx,entry) in entries.iter().enumerate() {
             let i_start = keyuri.len();
-            let mut i_end = decided_path.len();
+            let mut i_end = og_path.len();
             if i_end > entry.request_uri.len() {
                 i_end = entry.request_uri.len();
             }
-            let decided_path_bytes = decided_path.as_bytes();
+            let og_path_bytes = og_path.as_bytes();
             let entry_req_uri_bytes = entry.request_uri.as_bytes();
             let mut fit = 0;
             for i in i_start..i_end {
-                if decided_path_bytes[i] != entry_req_uri_bytes[i] {
+                if og_path_bytes[i] != entry_req_uri_bytes[i] {
                     break;
                 }
                 fit += 1;
@@ -1450,7 +1475,7 @@ impl HttpConn for Http3Conn {
         &mut self, conn: &mut quiche::Connection,
         _partial_requests: &mut HashMap<u64, PartialRequest>,
         partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],  protobuf_cache: &mut HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>>
+        index: &str, buf: &mut [u8], priority_context: &mut PriorityContext,
     ) -> quiche::h3::Result<()> {
         // Process HTTP stream-related events.
         loop {
@@ -1473,8 +1498,22 @@ impl HttpConn for Http3Conn {
                     conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                         .unwrap();
 
+                    // pass "default" cache_key so we can access it after the function call
+                    let mut cache_key = custom_cache::CacheKey {
+                        method: "".to_string(),
+                        keyuri: "".to_string(),
+                        host: "".to_string(),
+                        https: false,
+                    };
+
                     let (mut headers, body, mut priority) =
-                        match Http3Conn::build_h3_response(root, index, &list, protobuf_cache) {
+                        match Http3Conn::build_h3_response(
+                            root,
+                            index,
+                            &list,
+                            priority_context,
+                            &mut cache_key,
+                        ) {
                             Ok(v) => v,
 
                             Err((error_code, _)) => {
@@ -1503,13 +1542,6 @@ impl HttpConn for Http3Conn {
                         ),
                     }
 
-                    if !priority.is_empty() {
-                        headers.push(quiche::h3::Header::new(
-                            b"priority",
-                            priority.as_slice(),
-                        ));
-                    }
-
                     #[cfg(feature = "sfv")]
                     let priority =
                         match quiche::h3::Priority::try_from(priority.as_slice())
@@ -1520,6 +1552,30 @@ impl HttpConn for Http3Conn {
 
                     #[cfg(not(feature = "sfv"))]
                     let priority = quiche::h3::Priority::default();
+
+                    // modify the priority using our context
+                    // if we return an error, we use what was supplied (or default)
+                    let priority = match priority_context
+                        .map_priority(&priority, cache_key.clone())
+                    {
+                        Ok(p) => p,
+                        Err(_) => {
+                            info!("using prior priority! map returned nothing. using: {:?}", priority);
+                            priority
+                        },
+                    };
+
+                    let (u, i) = priority.get_fields();
+                    // build the string so we can add it to the header
+                    let prio_str = if i {
+                        format!("u={}, i", u)
+                    } else {
+                        format!("u={}", u)
+                    };
+                    headers.push(quiche::h3::Header::new(
+                        b"priority",
+                        prio_str.as_bytes(),
+                    ));
 
                     // this looks like it pulls the priority update for the stream, if it was
                     // received before the request. if so, it pushes the "priority" header?
@@ -1542,6 +1598,14 @@ impl HttpConn for Http3Conn {
                             content_type = headv;
                         }
                     }
+
+                    priority_context.logger.add_msg(
+                        stream_id,
+                        &priority,
+                        hdrs_to_strings(&list),
+                        content_type.clone(),
+                        cache_key,
+                    );
 
                     info!("resource_priority ### {} ### {:?} ### {:?} ### {}",
                         stream_id,

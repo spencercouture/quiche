@@ -808,7 +808,7 @@ pub enum Event {
 /// Structured Fields Dictionary field value. I.e, use `TryFrom` to parse the
 /// value of a Priority header field or a PRIORITY_UPDATE frame. Using this
 /// trait requires the `sfv` feature to be enabled.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[repr(C)]
 pub struct Priority {
     urgency: u8,
@@ -831,6 +831,12 @@ impl Priority {
             urgency,
             incremental,
         }
+    }
+
+    /// Public access for struct fields
+    #[allow(missing_docs)]
+    pub fn get_fields(&self) -> (u8, bool) {
+        (self.urgency, self.incremental)
     }
 }
 

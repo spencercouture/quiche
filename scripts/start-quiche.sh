@@ -20,7 +20,7 @@ cert_basename=$(basename $cert_file)
 key_basename=$(basename $key_file)
 
 env_vars="export QLOGDIR=/server-data/$idx/ && export RUST_BACKTRACE=1 && export SSLKEYLOGFILE=/server-data/$idx/sslkeyfile"
-quiche_args="--initial-cwnd-packets 100 --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key"
+quiche_args="--initial-cwnd-packets 100 --listen $addr --cert /server-data/$idx/cert.crt --key /server-data/$idx/cert.key --priorities-input /static_files/priorities.json --priorities-output /server-data/$idx/priorities.json"
 cmd_string="$env_vars && quiche-server $quiche_args 2>&1 | tee /server-data/$idx/server.log"
 
 docker exec -d quiche-server bash -c "echo \"$cmd_string\" > /server-data/$idx/start-server.sh"

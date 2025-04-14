@@ -49,16 +49,13 @@ use quiche_apps::common::*;
 
 use quiche_apps::sendto::*;
 
-use quiche_apps::custom_cache;
+use quiche_apps::priority_engine;
 
 const MAX_BUF_SIZE: usize = 65507;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
-    // get protobuf-populated cache
-    let mut cache: HashMap<custom_cache::CacheKey, Vec<custom_cache::CacheEntry>> = custom_cache::get_cache();
-
     let mut buf = [0; MAX_BUF_SIZE];
     let mut out = [0; MAX_BUF_SIZE];
     let mut pacing = false;
@@ -69,6 +66,15 @@ fn main() {
     let docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
     let conn_args = CommonArgs::with_docopt(&docopt);
     let args = ServerArgs::with_docopt(&docopt);
+
+    // parse our arguments and setup our PriorityContext
+    let mut priority_context =
+        priority_engine::PriorityContext::new(args.priorities_output.clone());
+    priority_context.output_loc = args.priorities_output;
+    match priority_context.load_priorities(args.priorities_input) {
+        Ok(_) => (),
+        Err(_) => info!("failed to read in priorities"),
+    }
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
@@ -512,11 +518,17 @@ fn main() {
                         partial_responses,
                         &args.root,
                         &args.index,
-                        &mut buf, &mut cache
+                        &mut buf,
+                        &mut priority_context
                     )
                     .is_err()
                 {
                     continue 'read;
+                }
+                // write our JSON file
+                match priority_context.logger.write_to_json() {
+                    Ok(_) => info!("updated priorities JSON file"),
+                    Err(_) => info!("error writing to priorities JSON file"),
                 }
             }
 

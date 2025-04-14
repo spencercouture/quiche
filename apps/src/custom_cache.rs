@@ -6,8 +6,10 @@ use std::fs::File;
 use std::fs;
 use std::collections::HashMap;
 use crate::http_record;
+use serde::{Deserialize, Serialize};
+use serde_json::to_writer;
 
-#[derive(Hash, Eq, PartialEq, Debug)]
+#[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct CacheKey {
     pub method: String,
     pub keyuri: String,
@@ -15,7 +17,7 @@ pub struct CacheKey {
     pub https: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
     pub request_uri: String,
     pub response_status: i64,
