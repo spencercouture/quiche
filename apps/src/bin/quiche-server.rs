@@ -69,10 +69,9 @@ fn main() {
 
     // parse our arguments and setup our PriorityContext
     let mut priority_context =
-        priority_engine::PriorityContext::new(args.priorities_output.clone());
-    priority_context.output_loc = args.priorities_output;
+        priority_engine::PriorityContext::new();
     match priority_context.load_priorities(args.priorities_input) {
-        Ok(_) => (),
+        Ok(_) => info!("read in priorities"),
         Err(_) => info!("failed to read in priorities"),
     }
 
@@ -525,11 +524,6 @@ fn main() {
                 {
                     continue 'read;
                 }
-                // write our JSON file
-                match priority_context.logger.write_to_json() {
-                    Ok(_) => info!("updated priorities JSON file"),
-                    Err(_) => info!("error writing to priorities JSON file"),
-                }
             }
 
             handle_path_events(client);
@@ -652,8 +646,16 @@ fn main() {
                 }
             }
 
+            // write our JSON file every time we cleanup a closed connection
+            match priority_context.write_files() {
+
+                Ok(_) => info!("updated priorities JSON file"),
+                Err(_) => info!("error writing to priorities JSON file"),
+            }
+
             !c.conn.is_closed()
         });
+
     }
 }
 
