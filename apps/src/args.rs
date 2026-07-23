@@ -436,7 +436,6 @@ Options:
   --listen <addr>             Listen on the given IP:port [default: 127.0.0.1:4433]
   --cert <file>               TLS certificate path [default: src/bin/cert.crt]
   --key <file>                TLS certificate key path [default: src/bin/cert.key]
-  --priorities-output <file>  Where to write PriorityLogMsg JSON output to
   --priorities-input <file>   The custom-formatted JSON file to read priority values from. See priority_engine.rs (same format as priorities_output)
   --root <dir>                Root directory [default: src/bin/root/]
   --index <name>              The file that will be used as index [default: index.html].
@@ -476,7 +475,6 @@ pub struct ServerArgs {
     pub root: String,
     pub index: String,
     pub cert: String,
-    pub priorities_output: String,
     pub priorities_input: String,
     pub key: String,
     pub disable_gso: bool,
@@ -493,7 +491,6 @@ impl Args for ServerArgs {
         let root = args.get_str("--root").to_string();
         let index = args.get_str("--index").to_string();
         let cert = args.get_str("--cert").to_string();
-        let priorities_output = args.get_str("--priorities-output").to_string();
         let priorities_input = args.get_str("--priorities-input").to_string();
         let key = args.get_str("--key").to_string();
         let disable_gso = args.get_bool("--disable-gso");
@@ -506,7 +503,6 @@ impl Args for ServerArgs {
             root,
             index,
             cert,
-            priorities_output,
             priorities_input,
             key,
             disable_gso,
