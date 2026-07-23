@@ -91,7 +91,7 @@ fn main() {
                 pacing = true;
                 debug!("successfully set SO_TXTIME socket option");
             },
-            Err(e) => debug!("setsockopt failed {:?}", e),
+            Err(e) => debug!("setsockopt failed {e:?}"),
         };
     }
 
@@ -108,7 +108,7 @@ fn main() {
         detect_gso(&socket, max_datagram_size)
     };
 
-    trace!("GSO detected: {}", enable_gso);
+    trace!("GSO detected: {enable_gso}");
 
     // Create the configuration for the QUIC connections.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -119,6 +119,7 @@ fn main() {
     config.set_application_protos(&conn_args.alpns).unwrap();
 
     config.discover_pmtu(args.enable_pmtud);
+    config.set_initial_rtt(conn_args.initial_rtt);
     config.set_max_idle_timeout(conn_args.idle_timeout);
     config.set_max_recv_udp_payload_size(max_datagram_size);
     config.set_max_send_udp_payload_size(max_datagram_size);
@@ -200,10 +201,10 @@ fn main() {
         let mut poll_res = poll.poll(&mut events, timeout);
         while let Err(e) = poll_res.as_ref() {
             if e.kind() == std::io::ErrorKind::Interrupted {
-                trace!("mio poll() call failed, retrying: {:?}", e);
+                trace!("mio poll() call failed, retrying: {e:?}");
                 poll_res = poll.poll(&mut events, timeout);
             } else {
-                panic!("mio poll() call failed fatally: {:?}", e);
+                panic!("mio poll() call failed fatally: {e:?}");
             }
         }
 
@@ -232,11 +233,11 @@ fn main() {
                         break 'read;
                     }
 
-                    panic!("recv() failed: {:?}", e);
+                    panic!("recv() failed: {e:?}");
                 },
             };
 
-            trace!("got {} bytes", len);
+            trace!("got {len} bytes from {from} to {local_addr}");
 
             let pkt_buf = &mut buf[..len];
 
@@ -259,12 +260,12 @@ fn main() {
                 Ok(v) => v,
 
                 Err(e) => {
-                    error!("Parsing packet header failed: {:?}", e);
+                    error!("Parsing packet header failed: {e:?}");
                     continue 'read;
                 },
             };
 
-            trace!("got packet {:?}", hdr);
+            trace!("got packet {hdr:?}");
 
             let conn_id = if !cfg!(feature = "fuzzing") {
                 let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
@@ -300,7 +301,7 @@ fn main() {
                             break;
                         }
 
-                        panic!("send() failed: {:?}", e);
+                        panic!("send() failed: {e:?}");
                     }
                     continue 'read;
                 }
@@ -339,7 +340,7 @@ fn main() {
                                 break;
                             }
 
-                            panic!("send() failed: {:?}", e);
+                            panic!("send() failed: {e:?}");
                         }
                         continue 'read;
                     }
@@ -387,7 +388,7 @@ fn main() {
                 #[cfg(feature = "qlog")]
                 {
                     if let Some(dir) = std::env::var_os("QLOGDIR") {
-                        let id = format!("{:?}", &scid);
+                        let id = format!("{:?}", scid);
                         let writer = make_qlog_writer(&dir, "server", &id);
 
                         conn.set_qlog(
@@ -500,13 +501,13 @@ fn main() {
                     client.conn.max_send_udp_payload_size();
             }
 
-            if client.http_conn.is_some() {
+            if let Some(http_conn) = client.http_conn.as_mut() {
                 let conn = &mut client.conn;
-                let http_conn = client.http_conn.as_mut().unwrap();
                 let partial_responses = &mut client.partial_responses;
 
-                // Handle writable streams.
-                for stream_id in conn.writable() {
+                // Visit all writable response streams to send any remaining HTTP
+                // content.
+                for stream_id in writable_response_streams(conn) {
                     http_conn.handle_writable(conn, partial_responses, stream_id);
                 }
 
@@ -530,7 +531,7 @@ fn main() {
 
             // See whether source Connection IDs have been retired.
             while let Some(retired_scid) = client.conn.retired_scid_next() {
-                info!("Retiring source CID {:?}", retired_scid);
+                info!("Retiring source CID {retired_scid:?}");
                 clients_ids.remove(&retired_scid);
             }
 
@@ -555,7 +556,7 @@ fn main() {
                 client.conn.stats().lost as f64 / client.conn.stats().sent as f64;
             if loss_rate > client.loss_rate + 0.001 {
                 client.max_send_burst = client.max_send_burst / 4 * 3;
-                // Minimun bound of 10xMSS.
+                // Minimum bound of 10xMSS.
                 client.max_send_burst =
                     client.max_send_burst.max(client.max_datagram_size * 10);
                 client.loss_rate = loss_rate;
@@ -616,10 +617,13 @@ fn main() {
                     break;
                 }
 
-                panic!("send_to() failed: {:?}", e);
+                panic!("send_to() failed: {e:?}");
             }
 
-            trace!("{} written {} bytes", client.conn.trace_id(), total_write);
+            trace!(
+                "{} written {total_write} bytes with {dst_info:?}",
+                client.conn.trace_id()
+            );
 
             if total_write >= max_send_burst {
                 trace!("{} pause writing", client.conn.trace_id(),);
@@ -792,17 +796,14 @@ fn handle_path_events(client: &mut Client) {
 fn set_txtime_sockopt(sock: &mio::net::UdpSocket) -> io::Result<()> {
     use nix::sys::socket::setsockopt;
     use nix::sys::socket::sockopt::TxTime;
-    use std::os::unix::io::AsRawFd;
+    use std::os::unix::io::AsFd;
 
     let config = nix::libc::sock_txtime {
         clockid: libc::CLOCK_MONOTONIC,
         flags: 0,
     };
 
-    // mio::net::UdpSocket doesn't implement AsFd (yet?).
-    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(sock.as_raw_fd()) };
-
-    setsockopt(&fd, TxTime, &config)?;
+    setsockopt(&sock.as_fd(), TxTime, &config)?;
 
     Ok(())
 }
@@ -810,10 +811,6 @@ fn set_txtime_sockopt(sock: &mio::net::UdpSocket) -> io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn set_txtime_sockopt(_: &mio::net::UdpSocket) -> io::Result<()> {
     use std::io::Error;
-    use std::io::ErrorKind;
 
-    Err(Error::new(
-        ErrorKind::Other,
-        "Not supported on this platform",
-    ))
+    Err(Error::other("Not supported on this platform"))
 }

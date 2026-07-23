@@ -12,10 +12,9 @@ cargo-fuzz = true
 opt-level = 3
 
 [dependencies]
-env_logger = "0.10"
+env_logger = "0.11"
+libfuzzer-sys = "0.4"
 quiche = { path = "../quiche", features = ["fuzzing"] }
-lazy_static = "1"
-libfuzzer-sys = { git = "https://github.com/rust-fuzz/libfuzzer-sys.git" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -28,6 +27,14 @@ path = "src/packet_recv_client.rs"
 [[bin]]
 name = "packet_recv_server"
 path = "src/packet_recv_server.rs"
+
+[[bin]]
+name = "packets_recv_server"
+path = "src/packets_recv_server.rs"
+
+[[bin]]
+name = "packets_posths_server"
+path = "src/packets_posths_server.rs"
 
 [[bin]]
 name = "qpack_decode"

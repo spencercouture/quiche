@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::cmp;
 use std::iter::FromIterator;
 use std::ops::Range;
 
@@ -135,6 +136,7 @@ impl RangeSet {
 
     /// Iterate over every single [`u64`] value covered by the ranges in this
     /// [`RangeSet`] in incremental order.
+    #[cfg(test)]
     pub fn flatten(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
         match self {
             RangeSet::BTree(set) =>
@@ -146,6 +148,7 @@ impl RangeSet {
     }
 
     /// The smallest value covered by ranges in this collection.
+    #[cfg(test)]
     pub fn first(&self) -> Option<u64> {
         match self {
             RangeSet::Inline(set) => set.inner.first().map(|(s, _)| *s),
@@ -277,8 +280,8 @@ impl BTreeRangeSet {
             if range_overlaps(&r, &item) {
                 self.inner.remove(&r.start);
 
-                start = std::cmp::min(start, r.start);
-                end = std::cmp::max(end, r.end);
+                start = cmp::min(start, r.start);
+                end = cmp::max(end, r.end);
             }
         }
 
@@ -298,8 +301,8 @@ impl BTreeRangeSet {
             // New range overlaps with existing range in the set, merge them.
             self.inner.remove(&r.start);
 
-            start = std::cmp::min(start, r.start);
-            end = std::cmp::max(end, r.end);
+            start = cmp::min(start, r.start);
+            end = cmp::max(end, r.end);
         }
 
         if self.inner.len() >= self.capacity {
@@ -313,7 +316,7 @@ impl BTreeRangeSet {
         let ranges: Vec<Range<u64>> = self
             .inner
             .range((Bound::Unbounded, Bound::Included(&largest)))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .collect();
 
         for r in ranges {
@@ -329,14 +332,14 @@ impl BTreeRangeSet {
     fn prev_to(&self, item: u64) -> Option<Range<u64>> {
         self.inner
             .range((Bound::Unbounded, Bound::Included(item)))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .next_back()
     }
 
     fn next_to(&self, item: u64) -> Option<Range<u64>> {
         self.inner
             .range((Bound::Included(item), Bound::Unbounded))
-            .map(|(&s, &e)| (s..e))
+            .map(|(&s, &e)| s..e)
             .next()
     }
 }

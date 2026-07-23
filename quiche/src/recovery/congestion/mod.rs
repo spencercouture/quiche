@@ -24,15 +24,62 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::str::FromStr;
 use std::time::Instant;
 
-use super::rtt::RttStats;
-use super::Acked;
+use self::recovery::Acked;
+use super::bandwidth::Bandwidth;
 use super::RecoveryConfig;
 use super::Sent;
+use crate::recovery::rtt;
+use crate::recovery::rtt::RttStats;
+use crate::recovery::CongestionControlAlgorithm;
+use crate::StartupExit;
+use crate::StartupExitReason;
 
-pub const PACING_MULTIPLIER: f64 = 1.25;
+pub struct SsThresh {
+    // Current slow start threshold.  Defaults to usize::MAX which
+    // indicates we're still in the initial slow start phase.
+    ssthresh: usize,
+
+    // Information about the slow start exit, if it already happened.
+    // Set on the first call to update().
+    startup_exit: Option<StartupExit>,
+}
+
+impl Default for SsThresh {
+    fn default() -> Self {
+        Self {
+            ssthresh: usize::MAX,
+            startup_exit: None,
+        }
+    }
+}
+
+impl SsThresh {
+    fn get(&self) -> usize {
+        self.ssthresh
+    }
+
+    fn startup_exit(&self) -> Option<StartupExit> {
+        self.startup_exit
+    }
+
+    fn update(&mut self, ssthresh: usize, in_css: bool) {
+        if self.startup_exit.is_none() {
+            let reason = if in_css {
+                // Exit happened in conservative slow start, attribute
+                // the exit to CSS.
+                StartupExitReason::ConservativeSlowStartRounds
+            } else {
+                // In normal slow start, attribute the exit to loss.
+                StartupExitReason::Loss
+            };
+            self.startup_exit = Some(StartupExit::new(ssthresh, None, reason));
+        }
+        self.ssthresh = ssthresh;
+    }
+}
+
 pub struct Congestion {
     // Congestion control.
     pub(crate) cc_ops: &'static CongestionControlOps,
@@ -42,9 +89,6 @@ pub struct Congestion {
     // HyStart++.
     pub(crate) hystart: hystart::Hystart,
 
-    // Pacing.
-    pub(crate) pacer: pacer::Pacer,
-
     // RFC6937 PRR.
     pub(crate) prr: prr::PRR,
 
@@ -52,15 +96,9 @@ pub struct Congestion {
     // transmitted together.
     send_quantum: usize,
 
-    // BBR state.
-    bbr_state: bbr::State,
-
-    // BBRv2 state.
-    bbr2_state: bbr2::State,
-
     pub(crate) congestion_window: usize,
 
-    pub(crate) ssthresh: usize,
+    pub(crate) ssthresh: SsThresh,
 
     bytes_acked_sl: usize,
 
@@ -78,6 +116,8 @@ pub struct Congestion {
     max_datagram_size: usize,
 
     pub(crate) lost_count: usize,
+
+    pub(crate) enable_cubic_idle_restart_fix: bool,
 }
 
 impl Congestion {
@@ -88,7 +128,7 @@ impl Congestion {
         let mut cc = Congestion {
             congestion_window: initial_congestion_window,
 
-            ssthresh: usize::MAX,
+            ssthresh: Default::default(),
 
             bytes_acked_sl: 0,
 
@@ -115,19 +155,10 @@ impl Congestion {
 
             hystart: hystart::Hystart::new(recovery_config.hystart),
 
-            pacer: pacer::Pacer::new(
-                recovery_config.pacing,
-                initial_congestion_window,
-                0,
-                recovery_config.max_send_udp_payload_size,
-                recovery_config.max_pacing_rate,
-            ),
-
             prr: prr::PRR::default(),
 
-            bbr_state: bbr::State::new(),
-
-            bbr2_state: bbr2::State::new(),
+            enable_cubic_idle_restart_fix: recovery_config
+                .enable_cubic_idle_restart_fix,
         };
 
         (cc.cc_ops.on_init)(&mut cc);
@@ -144,16 +175,13 @@ impl Congestion {
         }
     }
 
-    pub(crate) fn delivery_rate(&self) -> u64 {
+    /// The most recent data delivery rate estimate.
+    pub(crate) fn delivery_rate(&self) -> Bandwidth {
         self.delivery_rate.sample_delivery_rate()
     }
 
     pub(crate) fn send_quantum(&self) -> usize {
         self.send_quantum
-    }
-
-    pub(crate) fn set_pacing_rate(&mut self, rate: u64, now: Instant) {
-        self.pacer.update(self.send_quantum, rate, now);
     }
 
     pub(crate) fn congestion_window(&self) -> usize {
@@ -167,7 +195,7 @@ impl Congestion {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_packet_sent(
         &mut self, bytes_in_flight: usize, sent_bytes: usize, now: Instant,
-        pkt: &mut Sent, rtt_stats: &RttStats, bytes_lost: u64, in_flight: bool,
+        pkt: &mut Sent, bytes_lost: u64, in_flight: bool,
     ) {
         if in_flight {
             self.update_app_limited(
@@ -179,23 +207,14 @@ impl Congestion {
             self.prr.on_packet_sent(sent_bytes);
 
             // HyStart++: Start of the round in a slow start.
-            if self.hystart.enabled() && self.congestion_window < self.ssthresh {
+            if self.hystart.enabled() &&
+                self.congestion_window < self.ssthresh.get()
+            {
                 self.hystart.start_round(pkt.pkt_num);
             }
         }
 
-        // Pacing: Set the pacing rate if CC doesn't do its own.
-        if !(self.cc_ops.has_custom_pacing)() &&
-            rtt_stats.first_rtt_sample.is_some()
-        {
-            let rate = PACING_MULTIPLIER * self.congestion_window as f64 /
-                rtt_stats.smoothed_rtt.as_secs_f64();
-            self.set_pacing_rate(rate as u64, now);
-        }
-
-        self.schedule_next_packet(now, sent_bytes);
-
-        pkt.time_sent = self.get_packet_send_time();
+        pkt.time_sent = now;
 
         // bytes_in_flight is already updated. Use previous value.
         self.delivery_rate
@@ -222,62 +241,6 @@ impl Congestion {
             now,
             rtt_stats,
         );
-    }
-
-    fn schedule_next_packet(&mut self, now: Instant, packet_size: usize) {
-        // Don't pace in any of these cases:
-        //   * Packet contains no data.
-        //   * The congestion window is within initcwnd.
-
-        let in_initcwnd = self.congestion_window <
-            self.max_datagram_size * self.initial_congestion_window_packets;
-
-        let sent_bytes = if !self.pacer.enabled() || in_initcwnd {
-            0
-        } else {
-            packet_size
-        };
-
-        self.pacer.send(sent_bytes, now);
-    }
-
-    pub(crate) fn get_packet_send_time(&self) -> Instant {
-        self.pacer.next_time()
-    }
-}
-
-/// Available congestion control algorithms.
-///
-/// This enum provides currently available list of congestion control
-/// algorithms.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[repr(C)]
-pub enum CongestionControlAlgorithm {
-    /// Reno congestion control algorithm. `reno` in a string form.
-    Reno  = 0,
-    /// CUBIC congestion control algorithm (default). `cubic` in a string form.
-    CUBIC = 1,
-    /// BBR congestion control algorithm. `bbr` in a string form.
-    BBR   = 2,
-    /// BBRv2 congestion control algorithm. `bbr2` in a string form.
-    BBR2  = 3,
-}
-
-impl FromStr for CongestionControlAlgorithm {
-    type Err = crate::Error;
-
-    /// Converts a string to `CongestionControlAlgorithm`.
-    ///
-    /// If `name` is not valid, `Error::CongestionControl` is returned.
-    fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
-        match name {
-            "reno" => Ok(CongestionControlAlgorithm::Reno),
-            "cubic" => Ok(CongestionControlAlgorithm::CUBIC),
-            "bbr" => Ok(CongestionControlAlgorithm::BBR),
-            "bbr2" => Ok(CongestionControlAlgorithm::BBR2),
-
-            _ => Err(crate::Error::CongestionControl),
-        }
     }
 }
 
@@ -311,7 +274,8 @@ pub(crate) struct CongestionControlOps {
 
     pub rollback: fn(r: &mut Congestion) -> bool,
 
-    pub has_custom_pacing: fn() -> bool,
+    #[cfg(feature = "qlog")]
+    pub state_str: fn(r: &Congestion, now: Instant) -> &'static str,
 
     pub debug_fmt: fn(
         r: &Congestion,
@@ -324,19 +288,73 @@ impl From<CongestionControlAlgorithm> for &'static CongestionControlOps {
         match algo {
             CongestionControlAlgorithm::Reno => &reno::RENO,
             CongestionControlAlgorithm::CUBIC => &cubic::CUBIC,
-            CongestionControlAlgorithm::BBR => &bbr::BBR,
-            CongestionControlAlgorithm::BBR2 => &bbr2::BBR2,
+            // Bbr2Gcongestion is routed to the congestion implementation in
+            // the gcongestion directory by Recovery::new_with_config;
+            // LegacyRecovery never gets a RecoveryConfig with the
+            // Bbr2Gcongestion algorithm.
+            CongestionControlAlgorithm::Bbr2Gcongestion => unreachable!(),
         }
     }
 }
 
-mod bbr;
-mod bbr2;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssthresh_init() {
+        let ssthresh: SsThresh = Default::default();
+        assert_eq!(ssthresh.get(), usize::MAX);
+        assert_eq!(ssthresh.startup_exit(), None);
+    }
+
+    #[test]
+    fn ssthresh_in_css() {
+        let expected_startup_exit = StartupExit::new(
+            1000,
+            None,
+            StartupExitReason::ConservativeSlowStartRounds,
+        );
+        let mut ssthresh: SsThresh = Default::default();
+        ssthresh.update(1000, true);
+        assert_eq!(ssthresh.get(), 1000);
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+
+        ssthresh.update(2000, true);
+        assert_eq!(ssthresh.get(), 2000);
+        // startup_exit is only updated on the first update.
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+
+        ssthresh.update(500, false);
+        assert_eq!(ssthresh.get(), 500);
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+    }
+
+    #[test]
+    fn ssthresh_in_slow_start() {
+        let expected_startup_exit =
+            StartupExit::new(1000, None, StartupExitReason::Loss);
+        let mut ssthresh: SsThresh = Default::default();
+        ssthresh.update(1000, false);
+        assert_eq!(ssthresh.get(), 1000);
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+
+        ssthresh.update(2000, true);
+        assert_eq!(ssthresh.get(), 2000);
+        // startup_exit is only updated on the first update.
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+
+        ssthresh.update(500, false);
+        assert_eq!(ssthresh.get(), 500);
+        assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
+    }
+}
+
 mod cubic;
 mod delivery_rate;
 mod hystart;
-pub(crate) mod pacer;
 mod prr;
+pub(crate) mod recovery;
 mod reno;
 
 #[cfg(test)]

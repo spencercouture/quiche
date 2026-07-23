@@ -157,7 +157,7 @@
 //! # let h3_config = quiche::h3::Config::new()?;
 //! # let mut http3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! match http3_conn.poll(&mut conn) {
-//!     Ok((stream_id, quiche::h3::Event::Headers{list, has_body})) => {
+//!     Ok((stream_id, quiche::h3::Event::Headers{list, more_frames})) => {
 //!         test.add_response_headers(stream_id, &list);
 //!     },
 //!
@@ -472,7 +472,7 @@ impl Http3Test {
                     Ok(stream_id) => stream_id,
 
                     Err(e) => {
-                        error!("failed to send request {:?}", e);
+                        error!("failed to send request {e:?}");
                         return Err(e);
                     },
                 };
@@ -480,10 +480,10 @@ impl Http3Test {
             self.issued_reqs.insert(s, self.current_idx);
 
             if let Some(body) = &req.body {
-                info!("sending body {:?}", body);
+                info!("sending body {body:?}");
 
                 if let Err(e) = h3_conn.send_body(conn, s, body, true) {
-                    error!("failed to send request body {:?}", e);
+                    error!("failed to send request body {e:?}");
                     return Err(e);
                 }
             }

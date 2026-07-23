@@ -14,9 +14,9 @@ WWW_DIR=/www
 DOWNLOAD_DIR=/downloads
 QUICHE_CLIENT=quiche-client
 QUICHE_SERVER=quiche-server
-QUICHE_CLIENT_OPT="--no-verify --dump-responses ${DOWNLOAD_DIR} --wire-version 00000001"
+QUICHE_CLIENT_OPT="--no-verify --dump-responses ${DOWNLOAD_DIR} --wire-version 1 --max-active-cids 8"
 # interop container has tso off. need to disable gso as well.
-QUICHE_SERVER_OPT_COMMON="--listen [::]:443 --root $WWW_DIR --cert /certs/cert.pem --key /certs/priv.key --disable-gso --disable-pacing"
+QUICHE_SERVER_OPT_COMMON="--listen [::]:443 --root $WWW_DIR --cert /certs/cert.pem --key /certs/priv.key --enable-active-migration --max-active-cids 8 --disable-gso --disable-pacing"
 QUICHE_SERVER_OPT="$QUICHE_SERVER_OPT_COMMON --no-retry "
 LOG_DIR=/logs
 LOG=$LOG_DIR/log.txt
@@ -70,10 +70,6 @@ check_testcase () {
 }
 
 run_quiche_client_tests () {
-    # TODO: https://github.com/marten-seemann/quic-interop-runner/issues/61
-    # remove this sleep when the issue above is resolved.
-    sleep 3
-
     case $1 in
         multiconnect )
             for req in $REQUESTS
@@ -120,7 +116,7 @@ mkdir -p $LOG_DIR
 
 if [ "$ROLE" == "client" ]; then
     # Wait for the simulator to start up.
-    /wait-for-it.sh sim:57832 -s -t 30
+    wait-for-it sim:57832 -s -t 30
     echo "## Starting quiche client..."
     echo "## Client params: $CLIENT_PARAMS"
     echo "## Requests: $REQUESTS"

@@ -39,13 +39,12 @@ use intrusive_collections::RBTreeAtomicLink;
 
 use smallvec::SmallVec;
 
+use crate::buffers::DefaultBufFactory;
+use crate::BufFactory;
 use crate::Error;
 use crate::Result;
 
 const DEFAULT_URGENCY: u8 = 127;
-
-// The default size of the receiver stream flow control window.
-const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
 
 /// The maximum size of the receiver stream flow control window.
 pub const MAX_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
@@ -57,6 +56,35 @@ pub const MAX_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
 #[derive(Default)]
 pub struct StreamIdHasher {
     id: u64,
+}
+
+/// Return value type of `RecvBuf::reset()`
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct RecvBufResetReturn {
+    /// Returns the difference between the previous max_data offset
+    /// received and the final size reported by the reset
+    pub max_data_delta: u64,
+
+    /// The amount of flow control credit that should be returned to the
+    /// connection level flow control.
+    pub consumed_flowcontrol: u64,
+}
+
+impl RecvBufResetReturn {
+    pub fn zero() -> Self {
+        Self {
+            max_data_delta: 0,
+            consumed_flowcontrol: 0,
+        }
+    }
+}
+
+/// Action to perform when reading from a stream's receive buffer.
+pub enum RecvAction<T: bytes::BufMut> {
+    /// Emit data by copying it into the provided buffer.
+    Emit { out: T },
+    /// Discard up to the specified number of bytes without copying.
+    Discard { len: usize },
 }
 
 impl std::hash::Hasher for StreamIdHasher {
@@ -85,9 +113,9 @@ pub type StreamIdHashSet = HashSet<u64, BuildStreamIdHasher>;
 
 /// Keeps track of QUIC streams and enforces stream limits.
 #[derive(Default)]
-pub struct StreamMap {
+pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
     /// Map of streams indexed by stream ID.
-    streams: StreamIdHashMap<Stream>,
+    streams: StreamIdHashMap<Stream<F>>,
 
     /// Set of streams that were completed and garbage collected.
     ///
@@ -112,9 +140,15 @@ pub struct StreamMap {
     local_max_streams_bidi: u64,
     local_max_streams_bidi_next: u64,
 
+    /// Initial maximum bidirectional stream count.
+    initial_max_streams_bidi: u64,
+
     /// Local maximum unidirectional stream count limit.
     local_max_streams_uni: u64,
     local_max_streams_uni_next: u64,
+
+    /// Initial maximum unidirectional stream count.
+    initial_max_streams_uni: u64,
 
     /// The total number of bidirectional streams opened by the local endpoint.
     local_opened_streams_bidi: u64,
@@ -161,18 +195,23 @@ pub struct StreamMap {
 
     /// The maximum size of a stream window.
     max_stream_window: u64,
+
+    /// Total number of bytes in send buffers across all streams.
+    tx_buffered: usize,
 }
 
-impl StreamMap {
+impl<F: BufFactory> StreamMap<F> {
     pub fn new(
         max_streams_bidi: u64, max_streams_uni: u64, max_stream_window: u64,
-    ) -> StreamMap {
+    ) -> Self {
         StreamMap {
             local_max_streams_bidi: max_streams_bidi,
             local_max_streams_bidi_next: max_streams_bidi,
+            initial_max_streams_bidi: max_streams_bidi,
 
             local_max_streams_uni: max_streams_uni,
             local_max_streams_uni_next: max_streams_uni,
+            initial_max_streams_uni: max_streams_uni,
 
             max_stream_window,
 
@@ -181,12 +220,12 @@ impl StreamMap {
     }
 
     /// Returns the stream with the given ID if it exists.
-    pub fn get(&self, id: u64) -> Option<&Stream> {
+    pub fn get(&self, id: u64) -> Option<&Stream<F>> {
         self.streams.get(&id)
     }
 
     /// Returns the mutable stream with the given ID if it exists.
-    pub fn get_mut(&mut self, id: u64) -> Option<&mut Stream> {
+    pub fn get_mut(&mut self, id: u64) -> Option<&mut Stream<F>> {
         self.streams.get_mut(&id)
     }
 
@@ -205,7 +244,7 @@ impl StreamMap {
     pub(crate) fn get_or_create(
         &mut self, id: u64, local_params: &crate::TransportParams,
         peer_params: &crate::TransportParams, local: bool, is_server: bool,
-    ) -> Result<&mut Stream> {
+    ) -> Result<&mut Stream<F>> {
         let (stream, is_new_and_writable) = match self.streams.entry(id) {
             hash_map::Entry::Vacant(v) => {
                 // Stream has already been closed and garbage collected.
@@ -246,7 +285,7 @@ impl StreamMap {
                 // Enforce stream count limits.
                 match (is_local(id, is_server), is_bidi(id)) {
                     (true, true) => {
-                        let n = std::cmp::max(
+                        let n = cmp::max(
                             self.local_opened_streams_bidi,
                             stream_sequence + 1,
                         );
@@ -259,7 +298,7 @@ impl StreamMap {
                     },
 
                     (true, false) => {
-                        let n = std::cmp::max(
+                        let n = cmp::max(
                             self.local_opened_streams_uni,
                             stream_sequence + 1,
                         );
@@ -272,7 +311,7 @@ impl StreamMap {
                     },
 
                     (false, true) => {
-                        let n = std::cmp::max(
+                        let n = cmp::max(
                             self.peer_opened_streams_bidi,
                             stream_sequence + 1,
                         );
@@ -285,7 +324,7 @@ impl StreamMap {
                     },
 
                     (false, false) => {
-                        let n = std::cmp::max(
+                        let n = cmp::max(
                             self.peer_opened_streams_uni,
                             stream_sequence + 1,
                         );
@@ -298,12 +337,13 @@ impl StreamMap {
                     },
                 };
 
+                let initial_window = max_rx_data;
                 let s = Stream::new(
                     id,
                     max_rx_data,
                     max_tx_data,
-                    is_bidi(id),
                     local,
+                    initial_window,
                     self.max_stream_window,
                 );
 
@@ -491,6 +531,13 @@ impl StreamMap {
         self.local_max_streams_bidi = self.local_max_streams_bidi_next;
     }
 
+    /// Sets the max_streams_bidi limit to the given value.
+    pub fn set_max_streams_bidi(&mut self, max: u64) {
+        self.local_max_streams_bidi = max;
+        self.local_max_streams_bidi_next = max;
+        self.initial_max_streams_bidi = max;
+    }
+
     /// Returns the current max_streams_bidi limit.
     pub fn max_streams_bidi(&self) -> u64 {
         self.local_max_streams_bidi
@@ -511,10 +558,20 @@ impl StreamMap {
         self.local_max_streams_uni_next
     }
 
+    /// Returns the peer's current maximum bidirectional stream count limit.
+    pub fn peer_max_streams_bidi(&self) -> u64 {
+        self.peer_max_streams_bidi
+    }
+
     /// Returns the number of bidirectional streams that can be created
     /// before the peer's stream count limit is reached.
     pub fn peer_streams_left_bidi(&self) -> u64 {
         self.peer_max_streams_bidi - self.local_opened_streams_bidi
+    }
+
+    /// Returns the peer's current maximum unidirectional stream count limit.
+    pub fn peer_max_streams_uni(&self) -> u64 {
+        self.peer_max_streams_uni
     }
 
     /// Returns the number of unidirectional streams that can be created
@@ -573,17 +630,17 @@ impl StreamMap {
     }
 
     /// Creates an iterator over streams that need to send STREAM_DATA_BLOCKED.
-    pub fn blocked(&self) -> hash_map::Iter<u64, u64> {
+    pub fn blocked(&self) -> hash_map::Iter<'_, u64, u64> {
         self.blocked.iter()
     }
 
     /// Creates an iterator over streams that need to send RESET_STREAM.
-    pub fn reset(&self) -> hash_map::Iter<u64, (u64, u64)> {
+    pub fn reset(&self) -> hash_map::Iter<'_, u64, (u64, u64)> {
         self.reset.iter()
     }
 
     /// Creates an iterator over streams that need to send STOP_SENDING.
-    pub fn stopped(&self) -> hash_map::Iter<u64, u64> {
+    pub fn stopped(&self) -> hash_map::Iter<'_, u64, u64> {
         self.stopped.iter()
     }
 
@@ -625,18 +682,28 @@ impl StreamMap {
 
     /// Returns true if the max bidirectional streams count needs to be updated
     /// by sending a MAX_STREAMS frame to the peer.
+    ///
+    /// This only sends MAX_STREAMS when available capacity is at or below 50%
+    /// of the initial maximum streams target.
     pub fn should_update_max_streams_bidi(&self) -> bool {
+        let available = self
+            .local_max_streams_bidi
+            .saturating_sub(self.peer_opened_streams_bidi);
         self.local_max_streams_bidi_next != self.local_max_streams_bidi &&
-            self.local_max_streams_bidi_next / 2 >
-                self.local_max_streams_bidi - self.peer_opened_streams_bidi
+            available <= self.initial_max_streams_bidi / 2
     }
 
     /// Returns true if the max unidirectional streams count needs to be updated
     /// by sending a MAX_STREAMS frame to the peer.
+    ///
+    /// This only send MAX_STREAMS when available capacity is at or below 50% of
+    /// the initial maximum streams target.
     pub fn should_update_max_streams_uni(&self) -> bool {
+        let available = self
+            .local_max_streams_uni
+            .saturating_sub(self.peer_opened_streams_uni);
         self.local_max_streams_uni_next != self.local_max_streams_uni &&
-            self.local_max_streams_uni_next / 2 >
-                self.local_max_streams_uni - self.peer_opened_streams_uni
+            available <= self.initial_max_streams_uni / 2
     }
 
     /// Returns the number of active streams in the map.
@@ -644,15 +711,77 @@ impl StreamMap {
     pub fn len(&self) -> usize {
         self.streams.len()
     }
+
+    /// Returns the total number of bytes buffered across all streams.
+    pub(crate) fn tx_buffered(&self) -> usize {
+        self.tx_buffered
+    }
+
+    /// Computes the actual number of bytes in send buffers by summing across
+    /// all streams. This is used for debugging to verify that tx_buffered
+    /// is accurate.
+    fn tx_buffered_actual(&self) -> usize {
+        self.streams
+            .values()
+            .map(|s| s.send.buffered_bytes() as usize)
+            .sum()
+    }
+
+    /// Checks if the stored tx_buffered matches the actual value.
+    /// Returns true if they match, false otherwise.
+    pub(crate) fn tx_buffered_is_consistent(&self) -> bool {
+        self.tx_buffered == self.tx_buffered_actual()
+    }
+
+    /// Updates the tx_buffered value by adding the delta.
+    pub(crate) fn add_tx_buffered(&mut self, delta: usize) {
+        self.tx_buffered += delta;
+
+        #[cfg(debug_assertions)]
+        self.debug_check_tx_buffered_consistency();
+    }
+
+    /// Updates the tx_buffered value by subtracting the delta.
+    pub(crate) fn sub_tx_buffered(&mut self, delta: usize) {
+        debug_assert!(self.tx_buffered >= delta);
+        self.tx_buffered = self.tx_buffered.saturating_sub(delta);
+
+        #[cfg(debug_assertions)]
+        self.debug_check_tx_buffered_consistency();
+    }
+
+    /// Verifies that the stored tx_buffered value matches the actual bytes in
+    /// send buffers across all streams. Enabled in debug builds to catch
+    /// inconsistencies early.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check_tx_buffered_consistency(&self) {
+        if !self.tx_buffered_is_consistent() {
+            let buffered_per_stream = self
+                .streams
+                .iter()
+                .map(|(id, s)| (*id, s.send.buffered_bytes()))
+                .collect::<Vec<_>>();
+
+            let actual = self.tx_buffered_actual();
+            let stored = self.tx_buffered;
+            panic!(
+                "tx_buffered mismatch: stored={}, actual={}, diff={}, buffered_per_stream={:?}",
+                stored,
+                actual,
+                stored as i64 - actual as i64,
+                buffered_per_stream
+            );
+        }
+    }
 }
 
 /// A QUIC stream.
-pub struct Stream {
+pub struct Stream<F: BufFactory = DefaultBufFactory> {
     /// Receive-side stream buffer.
     pub recv: recv_buf::RecvBuf,
 
     /// Send-side stream buffer.
-    pub send: send_buf::SendBuf,
+    pub send: send_buf::SendBuf<F>,
 
     pub send_lowat: usize,
 
@@ -671,22 +800,22 @@ pub struct Stream {
     pub priority_key: Arc<StreamPriorityKey>,
 }
 
-impl Stream {
+impl<F: BufFactory> Stream<F> {
     /// Creates a new stream with the given flow control limits.
     pub fn new(
-        id: u64, max_rx_data: u64, max_tx_data: u64, bidi: bool, local: bool,
-        max_window: u64,
-    ) -> Stream {
+        id: u64, max_rx_data: u64, max_tx_data: u64, local: bool,
+        initial_window: u64, max_window: u64,
+    ) -> Self {
         let priority_key = Arc::new(StreamPriorityKey {
             id,
             ..Default::default()
         });
 
         Stream {
-            recv: recv_buf::RecvBuf::new(max_rx_data, max_window),
+            recv: recv_buf::RecvBuf::new(max_rx_data, initial_window, max_window),
             send: send_buf::SendBuf::new(max_tx_data),
             send_lowat: 1,
-            bidi,
+            bidi: is_bidi(id),
             local,
             urgency: priority_key.urgency,
             incremental: priority_key.incremental,
@@ -787,50 +916,47 @@ impl PartialEq for StreamPriorityKey {
 impl Eq for StreamPriorityKey {}
 
 impl PartialOrd for StreamPriorityKey {
-    // Priority ordering is complex, disable Clippy warning.
-    #[allow(clippy::non_canonical_partial_ord_impl)]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StreamPriorityKey {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         // Ignore priority if ID matches.
         if self.id == other.id {
-            return Some(std::cmp::Ordering::Equal);
+            return cmp::Ordering::Equal;
         }
 
         // First, order by urgency...
         if self.urgency != other.urgency {
-            return self.urgency.partial_cmp(&other.urgency);
+            return self.urgency.cmp(&other.urgency);
         }
 
         // ...when the urgency is the same, and both are not incremental, order
         // by stream ID...
         if !self.incremental && !other.incremental {
-            return self.id.partial_cmp(&other.id);
+            return self.id.cmp(&other.id);
         }
 
         // ...non-incremental takes priority over incremental...
         if self.incremental && !other.incremental {
-            return Some(std::cmp::Ordering::Greater);
+            return cmp::Ordering::Greater;
         }
         if !self.incremental && other.incremental {
-            return Some(std::cmp::Ordering::Less);
+            return cmp::Ordering::Less;
         }
 
         // ...finally, when both are incremental, `other` takes precedence (so
         // `self` is always sorted after other same-urgency incremental
         // entries).
-        Some(std::cmp::Ordering::Greater)
-    }
-}
-
-impl Ord for StreamPriorityKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // `partial_cmp()` never returns `None`, so this should be safe.
-        self.partial_cmp(other).unwrap()
+        cmp::Ordering::Greater
     }
 }
 
 intrusive_adapter!(pub StreamWritablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { writable: RBTreeAtomicLink });
 
-impl<'a> KeyAdapter<'a> for StreamWritablePriorityAdapter {
+impl KeyAdapter<'_> for StreamWritablePriorityAdapter {
     type Key = StreamPriorityKey;
 
     fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
@@ -840,7 +966,7 @@ impl<'a> KeyAdapter<'a> for StreamWritablePriorityAdapter {
 
 intrusive_adapter!(pub StreamReadablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { readable: RBTreeAtomicLink });
 
-impl<'a> KeyAdapter<'a> for StreamReadablePriorityAdapter {
+impl KeyAdapter<'_> for StreamReadablePriorityAdapter {
     type Key = StreamPriorityKey;
 
     fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
@@ -850,7 +976,7 @@ impl<'a> KeyAdapter<'a> for StreamReadablePriorityAdapter {
 
 intrusive_adapter!(pub StreamFlushablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { flushable: RBTreeAtomicLink });
 
-impl<'a> KeyAdapter<'a> for StreamFlushablePriorityAdapter {
+impl KeyAdapter<'_> for StreamFlushablePriorityAdapter {
     type Key = StreamPriorityKey;
 
     fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
@@ -893,148 +1019,18 @@ impl ExactSizeIterator for StreamIter {
     }
 }
 
-/// Buffer holding data at a specific offset.
-///
-/// The data is stored in a `Vec<u8>` in such a way that it can be shared
-/// between multiple `RangeBuf` objects.
-///
-/// Each `RangeBuf` will have its own view of that buffer, where the `start`
-/// value indicates the initial offset within the `Vec`, and `len` indicates the
-/// number of bytes, starting from `start` that are included.
-///
-/// In addition, `pos` indicates the current offset within the `Vec`, starting
-/// from the very beginning of the `Vec`.
-///
-/// Finally, `off` is the starting offset for the specific `RangeBuf` within the
-/// stream the buffer belongs to.
-#[derive(Clone, Debug, Default, Eq)]
-pub struct RangeBuf {
-    /// The internal buffer holding the data.
-    ///
-    /// To avoid needless allocations when a RangeBuf is split, this field is
-    /// reference-counted and can be shared between multiple RangeBuf objects,
-    /// and sliced using the `start` and `len` values.
-    data: Arc<Vec<u8>>,
-
-    /// The initial offset within the internal buffer.
-    start: usize,
-
-    /// The current offset within the internal buffer.
-    pos: usize,
-
-    /// The number of bytes in the buffer, from the initial offset.
-    len: usize,
-
-    /// The offset of the buffer within a stream.
-    off: u64,
-
-    /// Whether this contains the final byte in the stream.
-    fin: bool,
-}
-
-impl RangeBuf {
-    /// Creates a new `RangeBuf` from the given slice.
-    pub fn from(buf: &[u8], off: u64, fin: bool) -> RangeBuf {
-        RangeBuf {
-            data: Arc::new(Vec::from(buf)),
-            start: 0,
-            pos: 0,
-            len: buf.len(),
-            off,
-            fin,
-        }
-    }
-
-    /// Returns whether `self` holds the final offset in the stream.
-    pub fn fin(&self) -> bool {
-        self.fin
-    }
-
-    /// Returns the starting offset of `self`.
-    pub fn off(&self) -> u64 {
-        (self.off - self.start as u64) + self.pos as u64
-    }
-
-    /// Returns the final offset of `self`.
-    pub fn max_off(&self) -> u64 {
-        self.off() + self.len() as u64
-    }
-
-    /// Returns the length of `self`.
-    pub fn len(&self) -> usize {
-        self.len - (self.pos - self.start)
-    }
-
-    /// Returns true if `self` has a length of zero bytes.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Consumes the starting `count` bytes of `self`.
-    pub fn consume(&mut self, count: usize) {
-        self.pos += count;
-    }
-
-    /// Splits the buffer into two at the given index.
-    pub fn split_off(&mut self, at: usize) -> RangeBuf {
-        assert!(
-            at <= self.len,
-            "`at` split index (is {}) should be <= len (is {})",
-            at,
-            self.len
-        );
-
-        let buf = RangeBuf {
-            data: self.data.clone(),
-            start: self.start + at,
-            pos: cmp::max(self.pos, self.start + at),
-            len: self.len - at,
-            off: self.off + at as u64,
-            fin: self.fin,
-        };
-
-        self.pos = cmp::min(self.pos, self.start + at);
-        self.len = at;
-        self.fin = false;
-
-        buf
-    }
-}
-
-impl std::ops::Deref for RangeBuf {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.data[self.pos..self.start + self.len]
-    }
-}
-
-impl Ord for RangeBuf {
-    fn cmp(&self, other: &RangeBuf) -> cmp::Ordering {
-        // Invert ordering to implement min-heap.
-        self.off.cmp(&other.off).reverse()
-    }
-}
-
-impl PartialOrd for RangeBuf {
-    fn partial_cmp(&self, other: &RangeBuf) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for RangeBuf {
-    fn eq(&self, other: &RangeBuf) -> bool {
-        self.off == other.off
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::range_buf::RangeBuf;
+
     use super::*;
+
+    /// The default size of the receiver stream flow control window.
+    const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
 
     #[test]
     fn recv_flow_control() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -1065,7 +1061,7 @@ mod tests {
 
     #[test]
     fn recv_past_fin() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1077,7 +1073,7 @@ mod tests {
 
     #[test]
     fn recv_fin_dup() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1095,7 +1091,7 @@ mod tests {
 
     #[test]
     fn recv_fin_change() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1107,7 +1103,7 @@ mod tests {
 
     #[test]
     fn recv_fin_lower_than_received() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1119,7 +1115,7 @@ mod tests {
 
     #[test]
     fn recv_fin_flow_control() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -1139,7 +1135,7 @@ mod tests {
 
     #[test]
     fn recv_fin_reset_mismatch() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1149,32 +1145,66 @@ mod tests {
     }
 
     #[test]
-    fn recv_reset_dup() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+    fn recv_reset_with_gap() {
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
 
         assert_eq!(stream.recv.write(first), Ok(()));
-        assert_eq!(stream.recv.reset(0, 5), Ok(0));
-        assert_eq!(stream.recv.reset(0, 5), Ok(0));
+        // Read one byte.
+        assert_eq!(stream.recv.emit(&mut [0; 1]), Ok((1, false)));
+        // Reset with a final size > than max previously received
+        assert_eq!(
+            stream.recv.reset(0, 10),
+            Ok(RecvBufResetReturn {
+                max_data_delta: 5,
+                // consumed_flowcontrol is 9, since we already read 1 byte
+                consumed_flowcontrol: 9
+            })
+        );
+        assert_eq!(stream.recv.reset(0, 10), Ok(RecvBufResetReturn::zero()));
+    }
+
+    #[test]
+    fn recv_reset_dup() {
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
+        assert!(!stream.recv.almost_full());
+
+        let first = RangeBuf::from(b"hello", 0, false);
+
+        assert_eq!(stream.recv.write(first), Ok(()));
+        assert_eq!(
+            stream.recv.reset(0, 5),
+            Ok(RecvBufResetReturn {
+                max_data_delta: 0,
+                consumed_flowcontrol: 5
+            })
+        );
+        assert_eq!(stream.recv.reset(0, 5), Ok(RecvBufResetReturn::zero()));
     }
 
     #[test]
     fn recv_reset_change() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
 
         assert_eq!(stream.recv.write(first), Ok(()));
-        assert_eq!(stream.recv.reset(0, 5), Ok(0));
+        assert_eq!(
+            stream.recv.reset(0, 5),
+            Ok(RecvBufResetReturn {
+                max_data_delta: 0,
+                consumed_flowcontrol: 5
+            })
+        );
         assert_eq!(stream.recv.reset(0, 10), Err(Error::FinalSize));
     }
 
     #[test]
     fn recv_reset_lower_than_received() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1187,7 +1217,7 @@ mod tests {
     fn send_flow_control() {
         let mut buf = [0; 25];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1230,7 +1260,7 @@ mod tests {
 
     #[test]
     fn send_past_fin() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1246,7 +1276,7 @@ mod tests {
 
     #[test]
     fn send_fin_dup() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1257,7 +1287,7 @@ mod tests {
 
     #[test]
     fn send_undo_fin() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1272,7 +1302,7 @@ mod tests {
     fn send_fin_max_data_match() {
         let mut buf = [0; 15];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let slice = b"hellohellohello";
 
@@ -1288,7 +1318,7 @@ mod tests {
     fn send_fin_zero_length() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"", true), Ok(0));
@@ -1304,7 +1334,7 @@ mod tests {
     fn send_ack() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1334,7 +1364,7 @@ mod tests {
     fn send_ack_reordering() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1371,7 +1401,7 @@ mod tests {
 
     #[test]
     fn recv_data_below_off() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
 
         let first = RangeBuf::from(b"hello", 0, false);
 
@@ -1394,7 +1424,7 @@ mod tests {
     #[test]
     fn stream_complete() {
         let mut stream =
-            Stream::new(0, 30, 30, true, true, DEFAULT_STREAM_WINDOW);
+            <Stream>::new(0, 30, 30, true, 30, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1437,7 +1467,7 @@ mod tests {
     fn send_fin_zero_length_output() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.off_front(), 0);
@@ -1467,7 +1497,7 @@ mod tests {
     fn send_emit() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 20, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1519,7 +1549,7 @@ mod tests {
     fn send_emit_ack() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 20, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1586,7 +1616,14 @@ mod tests {
     fn send_emit_retransmit() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(
+            0,
+            0,
+            20,
+            true,
+            DEFAULT_STREAM_WINDOW,
+            DEFAULT_STREAM_WINDOW,
+        );
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1696,7 +1733,7 @@ mod tests {
 
     #[test]
     fn rangebuf_split_off() {
-        let mut buf = RangeBuf::from(b"helloworld", 5, true);
+        let mut buf = <RangeBuf>::from(b"helloworld", 5, true);
         assert_eq!(buf.start, 0);
         assert_eq!(buf.pos, 0);
         assert_eq!(buf.len, 10);
@@ -1816,7 +1853,7 @@ mod tests {
         let local_tp = crate::TransportParams::default();
         let peer_tp = crate::TransportParams::default();
 
-        let mut streams = StreamMap::new(5, 5, 5);
+        let mut streams = <StreamMap>::new(5, 5, 5);
 
         let stream_id = 500;
         assert!(!is_local(stream_id, true), "stream id is peer initiated");
@@ -1837,7 +1874,7 @@ mod tests {
         let local_tp = crate::TransportParams::default();
         let peer_tp = crate::TransportParams::default();
 
-        let mut streams = StreamMap::new(5, 5, 5);
+        let mut streams = <StreamMap>::new(5, 5, 5);
 
         for stream_id in [8, 12, 4] {
             assert!(is_local(stream_id, false), "stream id is client initiated");
@@ -1854,7 +1891,7 @@ mod tests {
         let local_tp = crate::TransportParams::default();
         let peer_tp = crate::TransportParams::default();
 
-        let mut streams = StreamMap::new(3, 3, 3);
+        let mut streams = <StreamMap>::new(3, 3, 3);
 
         // Highest permitted
         let stream_id = 8;
@@ -1957,7 +1994,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut streams = StreamMap::new(100, 100, 100);
+        let mut streams = <StreamMap>::new(100, 100, 100);
 
         // Streams where the urgency descends (becomes more important). No stream
         // shares an urgency.
@@ -2214,6 +2251,245 @@ mod tests {
         let walk_2: Vec<u64> =
             prioritized_writable.iter().map(|s| s.id).collect();
         assert_eq!(walk_2, vec![0, 0, 4, 4, 8, 8, 12, 12]);
+    }
+
+    #[test]
+    fn retransmit_returns_zero_when_already_acked() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit some data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark data for retransmission.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack the data.
+        stream.send.ack_and_drop(0, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Try to retransmit again - should return 0 since data is acked.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 0);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn retransmit_returns_partial_when_some_acked() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit 10 bytes.
+        assert_eq!(stream.send.write(b"helloworld", false), Ok(10));
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 10);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark all data for retransmission.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 10);
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        // Ack first 5 bytes and drop them.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Try to retransmit all 10 bytes - should return 5 since first 5 are
+        // acked.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 0); // Already marked, so no change
+        assert_eq!(stream.send.buffered_bytes(), 5);
+    }
+
+    #[test]
+    fn ack_and_drop_decrements_len_and_returns_dropped() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write some data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Emit it.
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark for retransmission.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack and drop - should decrement len and return dropped amount.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn ack_and_drop_partial_buffer() {
+        let mut stream = <Stream>::new(0, 30, 30, true, 0, 30);
+
+        // Write and emit two chunks.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.write(b"world", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 10);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark both chunks for retransmission.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 10);
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        // Ack and drop only first chunk.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack and drop second chunk.
+        let dropped = stream.send.ack_and_drop(5, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn ack_and_drop_returns_zero_when_nothing_dropped() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+
+        // Ack data that's already been fully emitted and not retransmitted.
+        // Nothing should be dropped since there's no buffered data.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 0);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn cache_consistency_through_full_lifecycle() {
+        // This test verifies that StreamMap.tx_buffered stays in sync with
+        // actual buffered data through a full lifecycle: write → emit →
+        // retransmit → ack.
+        let mut streams = <StreamMap>::new(5, 5, 15);
+
+        // Create a stream using low-level StreamMap interface.
+        let local_params = crate::TransportParams {
+            initial_max_data: 30,
+            initial_max_stream_data_bidi_local: 15,
+            initial_max_stream_data_bidi_remote: 15,
+            initial_max_stream_data_uni: 10,
+            initial_max_streams_bidi: 5,
+            initial_max_streams_uni: 5,
+            ..Default::default()
+        };
+        let peer_params = local_params.clone();
+
+        // Update peer stream limits to allow locally-initiated streams.
+        streams.update_peer_max_streams_bidi(5);
+        streams.update_peer_max_streams_uni(5);
+
+        let stream_id = 0u64;
+
+        // Write data: both stream.send.buffered_bytes() and tx_buffered increase.
+        {
+            let stream = streams
+                .get_or_create(
+                    stream_id,
+                    &local_params,
+                    &peer_params,
+                    true,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        }
+        streams.add_tx_buffered(5);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(streams.tx_buffered(), 5);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Emit data: both stream.send.buffered_bytes() and tx_buffered decrease.
+        let mut buf = [0; 10];
+        let written = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            let (written, _) = stream.send.emit(&mut buf).unwrap();
+            written
+        };
+        assert_eq!(written, 5);
+        streams.sub_tx_buffered(5);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(streams.tx_buffered(), 0);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Retransmit: both stream.send.buffered_bytes() and tx_buffered increase
+        // by actual amount retransmitted.
+        let retransmitted = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            stream.send.retransmit(0, 5)
+        };
+        assert_eq!(retransmitted, 5);
+        streams.add_tx_buffered(retransmitted);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(streams.tx_buffered(), 5);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Ack and drop: both stream.send.buffered_bytes() and tx_buffered
+        // decrease by actual amount dropped.
+        let dropped = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            stream.send.ack_and_drop(0, 5)
+        };
+        assert_eq!(dropped, 5);
+        streams.sub_tx_buffered(dropped);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(streams.tx_buffered(), 0);
+        assert!(streams.tx_buffered_is_consistent());
+    }
+
+    #[test]
+    fn send_buf_len_reflects_buffered_data() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Initially empty.
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // After write.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // After emit.
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // After retransmit.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // After ack_and_drop.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
     }
 }
 

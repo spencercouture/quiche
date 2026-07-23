@@ -33,12 +33,9 @@ use std::io;
 pub fn detect_gso(socket: &mio::net::UdpSocket, segment_size: usize) -> bool {
     use nix::sys::socket::setsockopt;
     use nix::sys::socket::sockopt::UdpGsoSegment;
-    use std::os::unix::io::AsRawFd;
+    use std::os::unix::io::AsFd;
 
-    // mio::net::UdpSocket doesn't implement AsFd (yet?).
-    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(socket.as_raw_fd()) };
-
-    setsockopt(&fd, UdpGsoSegment, &(segment_size as i32)).is_ok()
+    setsockopt(&socket.as_fd(), UdpGsoSegment, &(segment_size as i32)).is_ok()
 }
 
 /// For non-Linux, there is no GSO support.
@@ -119,11 +116,9 @@ pub fn send_to(
     while left > 0 {
         let pkt_len = cmp::min(left, segment_size);
 
-        match socket.send_to(&buf[off..off + pkt_len], send_info.to) {
-            Ok(v) => {
-                written += v;
-            },
-            Err(e) => return Err(e),
+        {
+            let v = socket.send_to(&buf[off..off + pkt_len], send_info.to)?;
+            written += v;
         }
 
         off += pkt_len;
