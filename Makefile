@@ -9,6 +9,10 @@ QNS_TAG   = latest
 FUZZ_REPO = cloudflare.mayhem.security:5000/protocols/quiche-libfuzzer
 FUZZ_TAG  = latest
 
+copy-to-container:
+	cargo build --package=quiche_apps
+	docker cp target/debug/quiche-server "quiche-server-${NSID}":/usr/local/bin/
+
 docker-build: docker-base docker-qns
 
 docker-protobuf-build: Dockerfile
