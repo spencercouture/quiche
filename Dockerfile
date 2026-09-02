@@ -26,7 +26,7 @@ RUN cargo build --release --manifest-path apps/Cargo.toml
 FROM debian:latest AS quiche-base
 
 # install iperf
-RUN apt-get update && apt-get install -y iperf
+RUN apt-get update && apt-get install -y iperf3
 
 RUN apt-get update && apt-get install -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
